@@ -733,14 +733,20 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
     {
         auto m = meta.getMessage();
 
-        if (! m.isNoteOnOrOff())
+        bool allOff = m.isAllNotesOff() || m.isAllSoundOff();
+
+        if (! m.isNoteOnOrOff() && ! allOff)
             continue;
 
         int nextDelta = int (m.getTimeStamp());
         nextDelta = std::min (nextDelta, sampleFrames);
         process (outS, nextDelta - delta, delta);
 
-        if (m.getNoteNumber() >= PIANO_MIN_NOTE && m.getNoteNumber() <= PIANO_MAX_NOTE)
+        if (allOff)
+        {
+            allNotesOff();
+        }
+        else if (m.getNoteNumber() >= PIANO_MIN_NOTE && m.getNoteNumber() <= PIANO_MAX_NOTE)
         {
             PianoNote* v = noteArray[size_t(m.getNoteNumber())].get();
             if (m.isNoteOn())
@@ -759,6 +765,21 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
     }
 
     process (outS, sampleFrames - delta, delta);
+}
+
+// Drops the dampers on every sounding note. Used for All Notes Off and All
+// Sound Off: cutting voices dead would leave energy in the strings that comes
+// back on the next strike, so they're damped instead (which is quick).
+void Piano::allNotesOff()
+{
+    PianoNote* v = voiceList;
+
+    do
+    {
+        if (v)
+            v->triggerOff();
+
+    } while (v && (v=v->next) && (v != voiceList));
 }
 
 void Piano::triggerOn (int note, float velocity, float* tune)

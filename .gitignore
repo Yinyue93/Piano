@@ -39,7 +39,8 @@ build-tests
 build-ninja-verify
 .claude
 build
-benchmark_results.jsonbin
+benchmark_results.json
+bin
 Installer/macOS/bin
 Installer/win/bin
 Installer/_flat_presets

@@ -34,8 +34,15 @@ public:
     juce::Array<const gin::Parameter*> params;
 	
 	constexpr static int interalBlockSize = 32;
-	
-	gin::AudioMidiFifo 		fifoIn {2, interalBlockSize};
+
+	// The engine renders fixed blocks of interalBlockSize. Incoming MIDI waits in
+	// pendingMidi (timestamps relative to the first unrendered sample) until a
+	// whole block is available. These buffers are preallocated in prepareToPlay
+	// so they don't allocate on the audio thread.
+	constexpr static int midiBufferBytes = 8192;
+	juce::MidiBuffer		pendingMidi, pendingMidiSpare, workMidi;
+	int						pendingSamples = 0;
+
 	gin::AudioMidiFifo		fifoOut {2, interalBlockSize};
 	juce::AudioSampleBuffer workBuffer {2, interalBlockSize};
 

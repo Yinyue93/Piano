@@ -2183,6 +2183,100 @@ private:
     }
 };
 
+//==============================================================================
+// MIDI handling tests
+//==============================================================================
+
+class PianoMidiTest
+{
+public:
+    bool run()
+    {
+        std::cout << "\nPiano MIDI Tests" << std::endl;
+        std::cout << "================" << std::endl;
+
+        bool allPassed = true;
+
+        allPassed &= testAllOffDampsNotes ("All Notes Off", juce::MidiMessage::allNotesOff (1));
+        allPassed &= testAllOffDampsNotes ("All Sound Off", juce::MidiMessage::allSoundOff (1));
+
+        if (allPassed)
+            std::cout << "All MIDI tests PASSED" << std::endl;
+        else
+            std::cerr << "Some MIDI tests FAILED" << std::endl;
+
+        return allPassed;
+    }
+
+private:
+    // A held note (no note off) must be damped by the controller message.
+    // These used to be ignored, so notes held by the sustain pedal rang on
+    // after a panic: SustainPedal drops its pending note offs on these messages.
+    bool testAllOffDampsNotes (const char* name, const juce::MidiMessage& allOff)
+    {
+        std::cout << "  Testing " << name << "..." << std::endl;
+
+        float ringing = renderTailRms (nullptr);
+        float damped  = renderTailRms (&allOff);
+
+        std::cout << "    Tail RMS ringing: " << ringing << ", after " << name << ": " << damped << std::endl;
+
+        if (ringing <= 0.0f || damped > 0.1f * ringing)
+        {
+            std::cerr << "    FAILED: " << name << " didn't damp the held note" << std::endl;
+            return false;
+        }
+
+        std::cout << "    " << name << ": PASSED" << std::endl;
+        return true;
+    }
+
+    // Strikes and holds a chord, optionally sends allOff after 0.25 s, and
+    // returns the RMS of 0.75 s - 1.25 s
+    static float renderTailRms (const juce::MidiMessage* allOff)
+    {
+        Piano piano;
+        piano.init (SAMPLE_RATE, BLOCK_SIZE);
+
+        for (int i = 0; i < NumParams; i++)
+            piano.setParameter (i, 0.5f);
+
+        std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE);
+        float* channels[2] = { left.data(), right.data() };
+
+        int numBlocks   = int (1.25f * SAMPLE_RATE) / BLOCK_SIZE;
+        int offBlock    = int (0.25f * SAMPLE_RATE) / BLOCK_SIZE;
+        int tailStart   = int (0.75f * SAMPLE_RATE) / BLOCK_SIZE;
+
+        double sum = 0.0;
+        int count = 0;
+
+        for (int b = 0; b < numBlocks; b++)
+        {
+            juce::MidiBuffer midi;
+
+            if (b == 0)
+                for (int note : { 48, 60, 64, 67 })
+                    midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+
+            if (allOff != nullptr && b == offBlock)
+                midi.addEvent (*allOff, 0);
+
+            piano.process (channels, BLOCK_SIZE, midi);
+
+            if (b >= tailStart)
+            {
+                for (auto s : left)
+                    sum += double (s) * s;
+
+                count += BLOCK_SIZE;
+            }
+        }
+
+        return float (std::sqrt (sum / std::max (count, 1)));
+    }
+};
+
 // Benchmark configuration
 constexpr float BENCHMARK_SAMPLE_RATE = 44100.0f;
 constexpr int BENCHMARK_BLOCK_SIZE = 512;
@@ -2393,7 +2487,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "FilterUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 1/6] Running Filter Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 1/7] Running Filter Unit Tests..." << std::endl;
 
         FilterUnitTest test;
         testsRun++;
@@ -2412,7 +2506,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "HammerUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 2/6] Running Hammer Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 2/7] Running Hammer Unit Tests..." << std::endl;
 
         HammerUnitTest test;
         testsRun++;
@@ -2431,7 +2525,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "MSD2FilterUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 3/6] Running MSD2Filter Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 3/7] Running MSD2Filter Unit Tests..." << std::endl;
 
         MSD2FilterUnitTest test;
         testsRun++;
@@ -2450,7 +2544,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "ResampleFIRUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 4/6] Running ResampleFIR Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 4/7] Running ResampleFIR Unit Tests..." << std::endl;
 
         ResampleFIRUnitTest test;
         testsRun++;
@@ -2469,7 +2563,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "DWGSUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 5/6] Running DWGS Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 5/7] Running DWGS Unit Tests..." << std::endl;
 
         DWGSUnitTest test;
         testsRun++;
@@ -2488,9 +2582,28 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "PianoEdgeCaseTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 6/6] Running Edge Case Tests..." << std::endl;
+        std::cout << "\n[Unit 6/7] Running Edge Case Tests..." << std::endl;
 
         PianoEdgeCaseTest test;
+        testsRun++;
+        if (test.run())
+        {
+            testsPassed++;
+        }
+        else
+        {
+            testsFailed++;
+            allPassed = false;
+        }
+    }
+
+    // Unit Test 7: MIDI handling
+    {
+        g_currentTestName = "PianoMidiTest";
+        g_currentTestPhase = "running";
+        std::cout << "\n[Unit 7/7] Running MIDI Tests..." << std::endl;
+
+        PianoMidiTest test;
         testsRun++;
         if (test.run())
         {

@@ -179,6 +179,7 @@ public:
     void process (float **out, int frameSamples, juce::MidiBuffer&);
     void init (float Fs, int blockSize);
     void triggerOn (int note, float velocity, float *tune);
+    void allNotesOff();
 
     //vst crap
     void setParameter (int32_t index, float value);

@@ -136,6 +136,29 @@ static float userValue (int32_t index, float value)
     return v;
 }
 
+// The parameters cover very different ranges (Volume is ~0.005, String Density
+// ~7850), so a fixed number of decimals shows most of them as 0.0
+static juce::String formatUserValue (int32_t index, float v)
+{
+    if (index == pDwgs4 || index == pDownsample || index == pLongModes)
+        return juce::String (juce::roundToInt (v));
+
+    auto a = std::abs (v);
+
+    if (a < 1.0e5f)
+    {
+        if (a >= 100.0f)    return juce::String (v, 0);
+        if (a >= 10.0f)     return juce::String (v, 1);
+        if (a >= 1.0f)      return juce::String (v, 2);
+        if (a == 0.0f)      return "0";
+    }
+
+    // Very small or very large: significant figures, with an exponent if needed
+    char text[32];
+    std::snprintf (text, sizeof (text), (a >= 0.001f && a < 1.0f) ? "%.3g" : "%.2g", double (v));
+    return text;
+}
+
 // Inverse of v = scale * exp (rate * (value - offset))
 static float invExp (float v, float scale, float rate, float offset)
 {
@@ -277,7 +300,7 @@ PianoAudioProcessor::PianoAudioProcessor()
         int idx = params.indexOf (&p);
 
         if (auto v = std::get_if<float> (&in))
-            return juce::String (userValue (idx, *v), 1);
+            return formatUserValue (idx, userValue (idx, *v));
 
         return userValueInverse (idx, std::get<juce::String> (in).getFloatValue());
     };
@@ -339,6 +362,10 @@ void PianoAudioProcessor::reset()
     Processor::reset();
 
     sustainPedal.reset();
+    pendingMidi.clear();
+
+    if (piano)
+        piano->allNotesOff();
 }
 
 void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPerBlock)
@@ -350,9 +377,14 @@ void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPer
 
 	sustainPedal.reset();
 
-	fifoIn.setSize (2, newSamplesPerBlock * 2 + interalBlockSize);
+	pendingMidi.ensureSize (midiBufferBytes);
+	pendingMidiSpare.ensureSize (midiBufferBytes);
+	workMidi.ensureSize (midiBufferBytes);
+	pendingMidi.clear();
+	pendingSamples = 0;
+
 	fifoOut.setSize (2, newSamplesPerBlock * 2 + interalBlockSize);
-	
+
 	fifoOut.clear();
 	fifoOut.writeSilence (interalBlockSize);
 }
@@ -378,19 +410,29 @@ void PianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     for (auto p : params)
         piano->setParameter (idx++, p->getValue());
 
-	fifoIn.write (buffer, midi);
-	
-	while (fifoIn.getNumSamplesAvailable() >= interalBlockSize)
-	{
-		juce::MidiBuffer workMidi;
-		fifoIn.read (workBuffer, workMidi);
+	// Queue this block's MIDI after whatever is still waiting from the last one
+	pendingMidi.addEvents (midi, 0, numSamples, pendingSamples);
+	pendingSamples += numSamples;
 
+	while (pendingSamples >= interalBlockSize)
+	{
+		workMidi.clear();
+		workMidi.addEvents (pendingMidi, 0, interalBlockSize, 0);
+
+		// Move the rest of the queue up to the start of the next block
+		pendingMidiSpare.clear();
+		pendingMidiSpare.addEvents (pendingMidi, interalBlockSize, pendingSamples - interalBlockSize, -interalBlockSize);
+		pendingMidi.swapWith (pendingMidiSpare);
+		pendingSamples -= interalBlockSize;
+
+		workBuffer.clear();
 		auto ptr = (float**)workBuffer.getArrayOfWritePointers();
 		piano->process (ptr, workBuffer.getNumSamples(), workMidi);
-		
-		fifoOut.write (workBuffer, workMidi);
+
+		// No MIDI goes through the output FIFO, which keeps its read() allocation free
+		fifoOut.write (workBuffer, {});
 	}
-	
+
 	// write the output
 	midi.clear();
 	fifoOut.read (buffer, midi);
