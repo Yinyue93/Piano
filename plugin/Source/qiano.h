@@ -41,8 +41,8 @@ public:
     operator float() const {
         return v;
     }
-    float f;
-    float v;
+    float f = 0.0f;
+    float v = 0.0f;
 };
 
 enum parameters {
@@ -97,7 +97,8 @@ public:
     float goUpDelayed();
     float goDown();
     float goDownDelayed();
-    void triggerOn (float velocity, float* tune);
+    // Returns false (and deactivates the note) if the strings can't be built
+    bool triggerOn (float velocity, float* tune);
     void triggerOff();
     bool isActive();
     void deActivate();
@@ -108,8 +109,8 @@ public:
     Piano* piano = nullptr;
 
     bool isDone();
-    float maxEnergy;
-    float energy;
+    float maxEnergy = 0.0f;
+    float energy = 0.0f;
     Delay<65536> outputdelay;
     static void fillFrequencyTable();
     static double freqTable[NUM_NOTES];
@@ -188,11 +189,12 @@ public:
 protected:     
     friend class PianoNote;
     Value vals[NumParams];
-    PianoNote* voiceList;
+    PianoNote* voiceList = nullptr;
     std::array<std::unique_ptr<PianoNote>, NUM_NOTES> noteArray;
-    int blockSize;
-    float Fs;
+    int blockSize = 0;
+    float Fs = 0.0f;
     std::vector<float> input;
+    bool soundboardDirty = true;
 
 #ifdef FDN_REVERB
     std::unique_ptr<Reverb> soundboard;

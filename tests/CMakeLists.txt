@@ -51,6 +51,7 @@ target_compile_definitions(PianoTests PRIVATE
     JUCE_USE_LAME_AUDIO_FORMAT=0
     JUCE_USE_WINDOWS_MEDIA_FORMAT=0
     DONT_SET_USING_JUCE_NAMESPACE=1
+    PIANO_DEBUG_CHECKS=1
 )
 
 juce_generate_juce_header(PianoTests)

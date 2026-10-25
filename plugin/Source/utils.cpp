@@ -1,39 +1,6 @@
 #include "utils.h"
 #include <cstdio>
 #include <cstdlib>
-#include <cstdint>
-
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-#define DEBUG_OUTPUT(msg) do { OutputDebugStringA(msg); fprintf(stderr, "%s", msg); fflush(stderr); } while(0)
-#else
-#define DEBUG_OUTPUT(msg) do { fprintf(stderr, "%s", msg); fflush(stderr); } while(0)
-#endif
-
-// Assertion macro for utils - prints pointer values before aborting
-#define UTILS_ASSERT(cond, msg, ...) do { \
-    if (!(cond)) { \
-        char _buf[512]; \
-        snprintf(_buf, sizeof(_buf), "UTILS ASSERT FAILED: " msg "\n  File: %s, Line: %d\n  Condition: %s\n", \
-                ##__VA_ARGS__, __FILE__, __LINE__, #cond); \
-        DEBUG_OUTPUT(_buf); \
-        abort(); \
-    } \
-} while(0)
-
-// Check if pointer looks valid (not null, not small integer, not -1/high invalid)
-#define UTILS_CHECK_PTR(ptr, name) do { \
-    volatile uintptr_t p = (uintptr_t)(ptr); \
-    volatile bool bad = (p == 0 || p < 0x10000 || p > 0x00007FFFFFFFFFFF); \
-    if (bad) { \
-        char _buf[512]; \
-        snprintf(_buf, sizeof(_buf), "UTILS BAD PTR: %s = %p (0x%llx) - invalid pointer!\n  File: %s, Line: %d\n", \
-                name, (void*)(ptr), (unsigned long long)p, __FILE__, __LINE__); \
-        DEBUG_OUTPUT(_buf); \
-        __debugbreak(); \
-    } \
-} while(0)
 
 float dot(int N, float *A, float *B) {
     float dot = 0;

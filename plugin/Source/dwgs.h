@@ -17,7 +17,8 @@ public:
     
     int getMaxDecimation(int downsample, int upsample, float Fs, float f, float magic);
     int getMinUpsample(int downsample, float Fs, float f, float inpos, float B);
-    void set(float Fs, int longmodes, int downsample, int upsample, float f, float c1, float c3, float B, float L, float longFreq1, float gammaL, float gammaL2, float inpos, float Z);
+    // Returns false if the string can't be built at this rate (the note shouldn't play)
+    bool set(float Fs, int longmodes, int downsample, int upsample, float f, float c1, float c3, float B, float L, float longFreq1, float gammaL, float gammaL2, float inpos, float Z);
     void damper(float c1, float c3, float gammaL, float gammaL2, int nDamper);
     
     float input_velocity();

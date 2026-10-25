@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "utils.h"
 #include <stdlib.h>
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 
@@ -16,7 +17,10 @@
 
 using namespace std;
 
-// Debug assertion macro - uses abort() so it works in Release builds too
+// These checks abort(), which would take the whole host down, so they're only
+// compiled into Debug builds and the test suite (PIANO_DEBUG_CHECKS)
+#if ! defined (NDEBUG) || defined (PIANO_DEBUG_CHECKS)
+
 #define DWGS_ASSERT(cond, msg) do { \
     if (!(cond)) { \
         char _buf[512]; \
@@ -49,6 +53,14 @@ using namespace std;
         abort(); \
     } \
 } while(0)
+
+#else
+
+#define DWGS_ASSERT(cond, msg)                      do { (void) sizeof (cond); } while(0)
+#define DWGS_CHECK_PTR(ptr, name)                   do { (void) sizeof (ptr); } while(0)
+#define DWGS_CHECK_PTR_RANGE(ptr, base, size, msg)  do { (void) sizeof ((ptr) < (base) + (size)); } while(0)
+
+#endif
 
 
 /*
@@ -284,12 +296,19 @@ fracDelayTop(8), fracDelayBottom(16), hammerDelay(8), d2(3)
     DWGS_ASSERT(d3.x == d3.x_ + 8, "dwgs ctor: d3.x not properly initialized");
 }
 
-void dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, float c1, float c3, float B, float L, float longFreq1, float gammaL, float gammaL2, float inpos, float Z)
+bool dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, float c1, float c3, float B, float L, float longFreq1, float gammaL, float gammaL2, float inpos, float Z)
 {
     this->downsample = downsample;
     this->upsample = upsample;
     float resample = (float)upsample / (float)downsample;
 
+    float deltot = Fs/downsample/f*upsample;
+
+    // The hammer needs at least 3 samples of delay (del1 >= 2). For very high
+    // notes at low sample rates the upsampling is capped, so move the hammer
+    // away from the string end instead of failing.
+    if ((int)((inpos*deltot) - 1.0) < 2)
+        inpos = 3.01f / deltot;
 
     this->L = L;
     this->f = f;
@@ -308,14 +327,13 @@ void dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, f
     this->longFreq1 = longFreq1;
 
 
-    float deltot = Fs/downsample/f*upsample;
     this->omega = float (TWOPI) / deltot;
     dDispersion = M*dispersion[0].phasedelay(omega);
 
     //logf("hammer delay = %g\n", inpos*deltot);
     del0 = (int)(0.5 * (inpos*deltot));
     del1 = (int)((inpos*deltot) - 1.0);
-    if(del1 < 2) abort();
+    if(del1 < 2) return false;
     dHammer = inpos * deltot - del1;
     int dd = std::min(4, del1 - 2);
     dHammer += dd;
@@ -328,8 +346,8 @@ void dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, f
     del2 = (int)(0.5*(deltot - inpos * deltot) - 1.0);
     del3 = (int)(0.5*(deltot - inpos * deltot) - dDispersion - 2.0);
 
-    if(del2 < 1) abort();
-    if(del3 < 1) abort();
+    if(del2 < 1) return false;
+    if(del3 < 1) return false;
 
     float delHalf = 0.5f * deltot;
 
@@ -358,6 +376,11 @@ void dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, f
     d3.setDelay(del3-1);
 
     delTab = del0 + del2 + del4;
+
+    // Very low notes at very high sample rates don't fit in the delay lines
+    if (std::max ({del1, del2, del3, delTab + 8}) >= DelaySize)
+        return false;
+
     float delta = dTop - (int)dTop;
     float delta2 = delHalf - delTab - delta;
 
@@ -376,7 +399,9 @@ void dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, f
     nLongModes = (int)(0.5f * Fs / downsample / longFreq1 - 0.5);
     nLongModes = (int)(0.5f * Fs / longmodes / longFreq1 - 0.5);
     //logf("nlongmodes = %d\n", nLongModes);
-    if(nLongModes >= nMaxLongModes) abort();
+    // Modes are 1-based, so the highest usable index is nMaxLongModes - 1.
+    // Dropping the top modes only loses the highest longitudinal partials.
+    nLongModes = std::min (nLongModes, nMaxLongModes - 1);
 
     //nLongModes = 1;
     gammaL /= resample;
@@ -419,6 +444,7 @@ void dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, f
 #endif
 
     damper(c1,c3,gammaL,gammaL2,128);
+    return true;
 }
 
 // XXX dwgresonator create 
@@ -508,7 +534,9 @@ int dwgs::getMinUpsample(int downsample, float Fs, float f, float inpos, float B
         dDispersion = M * dispersion[0].phasedelay (omega);
         del3 = (int)(0.5f * (deltot - inpos * deltot) - dDispersion - 2.0);
 
-        if (del1 < 2 || del3 < 4)
+        // The dispersion filters only have room for MaxFilterUpsample, so stop
+        // there; set() clamps the hammer position if that still isn't enough
+        if ((del1 < 2 || del3 < 4) && upsample < MaxFilterUpsample)
             upsample *= 2;
         else
             break;

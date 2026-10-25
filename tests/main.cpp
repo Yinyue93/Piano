@@ -2034,6 +2034,155 @@ private:
     }
 };
 
+//==============================================================================
+// Edge case tests: settings and sample rates that used to overflow or abort()
+//==============================================================================
+
+class PianoEdgeCaseTest
+{
+public:
+    bool run()
+    {
+        std::cout << "\nPiano Edge Case Tests" << std::endl;
+        std::cout << "=====================" << std::endl;
+
+        bool allPassed = true;
+
+        allPassed &= testUpsampleIsCapped();
+        allPassed &= testExtremeSettings();
+
+        if (allPassed)
+            std::cout << "All edge case tests PASSED" << std::endl;
+        else
+            std::cerr << "Some edge case tests FAILED" << std::endl;
+
+        return allPassed;
+    }
+
+private:
+    // Same defaults as PianoAudioProcessor's parameters
+    static constexpr float pluginDefaults[NumParams] = {
+        0.5f, 0.5f, 0.5f, 0.5f, 0.25f, 0.25f, 0.5f, 0.5f, 0.5f, 0.5f,
+        0.5f, 0.5f, 0.5f, 0.0f, 0.25f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,
+        0.5f, 0.0f, 0.5f, 0.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,
+        0.5f, 1.0f, 0.0f, 0.0f
+    };
+
+    bool testUpsampleIsCapped()
+    {
+        std::cout << "  Testing upsample cap..." << std::endl;
+
+        // Top note with the hammer right at the string end: without the cap this
+        // asked for 16x and overran the dispersion filter's coefficient buffers
+        for (float Fs : { 22050.0f, 32000.0f, 44100.0f })
+        {
+            for (int downsample : { 1, 2 })
+            {
+                dwgs string;
+                int upsample = string.getMinUpsample (downsample, Fs, 4400.0f, 0.04f, 1e-3f);
+
+                if (upsample > MaxFilterUpsample)
+                {
+                    std::cerr << "    FAILED: upsample " << upsample << " > " << MaxFilterUpsample
+                              << " (Fs " << Fs << ", downsample " << downsample << ")" << std::endl;
+                    return false;
+                }
+            }
+        }
+
+        std::cout << "    Upsample cap: PASSED" << std::endl;
+        return true;
+    }
+
+    bool testExtremeSettings()
+    {
+        std::cout << "  Testing extreme settings across sample rates..." << std::endl;
+
+        struct Config
+        {
+            const char* name;
+            std::vector<float> values;
+        };
+
+        std::vector<float> defaults (pluginDefaults, pluginDefaults + NumParams);
+
+        auto edge = defaults;
+        edge[pDwgs4] = 1.0f;
+        edge[pDownsample] = 1.0f;
+        edge[pHammerPosition] = 0.0f;
+
+        std::vector<Config> configs = {
+            { "plugin defaults",                      defaults },
+            { "downsample + hammer at string end",    edge },
+            { "all minimum",                          std::vector<float> (NumParams, 0.0f) },
+            { "all maximum",                          std::vector<float> (NumParams, 1.0f) },
+        };
+
+        bool allPassed = true;
+
+        for (float Fs : { 22050.0f, 44100.0f, 96000.0f, 192000.0f })
+        {
+            for (auto& config : configs)
+            {
+                g_currentTestPhase = config.name;
+
+                int nonFinite = render (Fs, config.values);
+
+                if (nonFinite > 0)
+                {
+                    std::cerr << "    FAILED: " << config.name << " @ " << Fs << " Hz produced "
+                              << nonFinite << " non-finite samples" << std::endl;
+                    allPassed = false;
+                }
+            }
+        }
+
+        if (allPassed)
+            std::cout << "    Extreme settings: PASSED" << std::endl;
+
+        return allPassed;
+    }
+
+    // Plays the lowest, middle and highest notes and returns the number of NaN/inf samples
+    static int render (float Fs, const std::vector<float>& values)
+    {
+        constexpr int blockSize = 32;
+
+        Piano piano;
+        piano.init (Fs, blockSize);
+
+        for (int i = 0; i < NumParams; i++)
+            piano.setParameter (i, values[size_t (i)]);
+
+        std::vector<float> left (blockSize), right (blockSize);
+        float* channels[2] = { left.data(), right.data() };
+
+        int numBlocks = int (0.25f * Fs) / blockSize;
+        int nonFinite = 0;
+
+        for (int b = 0; b < numBlocks; b++)
+        {
+            juce::MidiBuffer midi;
+
+            for (int note : { PIANO_MIN_NOTE, 60, PIANO_MAX_NOTE })
+            {
+                if (b == 0)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 127), 0);
+                else if (b == numBlocks / 2)
+                    midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+            }
+
+            piano.process (channels, blockSize, midi);
+
+            for (auto s : left)
+                if (! std::isfinite (s))
+                    nonFinite++;
+        }
+
+        return nonFinite;
+    }
+};
+
 // Benchmark configuration
 constexpr float BENCHMARK_SAMPLE_RATE = 44100.0f;
 constexpr int BENCHMARK_BLOCK_SIZE = 512;
@@ -2244,7 +2393,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "FilterUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 1/5] Running Filter Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 1/6] Running Filter Unit Tests..." << std::endl;
 
         FilterUnitTest test;
         testsRun++;
@@ -2263,7 +2412,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "HammerUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 2/5] Running Hammer Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 2/6] Running Hammer Unit Tests..." << std::endl;
 
         HammerUnitTest test;
         testsRun++;
@@ -2282,7 +2431,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "MSD2FilterUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 3/5] Running MSD2Filter Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 3/6] Running MSD2Filter Unit Tests..." << std::endl;
 
         MSD2FilterUnitTest test;
         testsRun++;
@@ -2301,7 +2450,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "ResampleFIRUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 4/5] Running ResampleFIR Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 4/6] Running ResampleFIR Unit Tests..." << std::endl;
 
         ResampleFIRUnitTest test;
         testsRun++;
@@ -2320,9 +2469,28 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "DWGSUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 5/5] Running DWGS Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 5/6] Running DWGS Unit Tests..." << std::endl;
 
         DWGSUnitTest test;
+        testsRun++;
+        if (test.run())
+        {
+            testsPassed++;
+        }
+        else
+        {
+            testsFailed++;
+            allPassed = false;
+        }
+    }
+
+    // Unit Test 6: Edge cases (extreme settings and sample rates)
+    {
+        g_currentTestName = "PianoEdgeCaseTest";
+        g_currentTestPhase = "running";
+        std::cout << "\n[Unit 6/6] Running Edge Case Tests..." << std::endl;
+
+        PianoEdgeCaseTest test;
         testsRun++;
         if (test.run())
         {

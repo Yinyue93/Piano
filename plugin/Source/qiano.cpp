@@ -366,6 +366,7 @@ void Piano::init (float Fs_, int blockSize_)
 
 #ifdef FDN_REVERB
     soundboard = std::make_unique<Reverb>(Fs);
+    soundboardDirty = true;
 #else
     soundboard = std::make_unique<ConvolveReverb<revSize>>(blockSize);
 #endif
@@ -417,7 +418,7 @@ bool PianoNote::isDone()
     return (energy < 1e-8 * maxEnergy);
 }
 
-void PianoNote::triggerOn (float velocity, float* tune)
+bool PianoNote::triggerOn (float velocity, float* tune)
 {
     //logf("note = %d velocity =  %g\n",note,velocity);
     Value *v = piano->vals;
@@ -583,10 +584,15 @@ void PianoNote::triggerOn (float velocity, float* tune)
             fk = f*(1 + (TUNE[nstrings-1][k]-1) * v[pStringDetuning]);
         }
 
-        stringT[k]->set(Fs,longmodes,downsample,upsample,fk,v[pStringDecay],v[pStringLopass],B,L,longFreq1,gammaL,gammaL2,hp,Z);
+        bool ok = stringT[k]->set(Fs,longmodes,downsample,upsample,fk,v[pStringDecay],v[pStringLopass],B,L,longFreq1,gammaL,gammaL2,hp,Z);
 #ifdef HSTRING
-        stringHT[k]->set(Fs,longmodes,downsample,upsample,fk,v[pStringDecay],v[pStringLopass],B,L,longFreq1,gammaL,gammaL2,hp,Z);
+        ok = ok && stringHT[k]->set(Fs,longmodes,downsample,upsample,fk,v[pStringDecay],v[pStringLopass],B,L,longFreq1,gammaL,gammaL2,hp,Z);
 #endif
+        if (! ok)
+        {
+            bActive = false;
+            return false;
+        }
 
         maxDel2 = std::max(stringT[k]->getDel2(), maxDel2);
     }
@@ -626,6 +632,7 @@ void PianoNote::triggerOn (float velocity, float* tune)
 
     //logf("upsample/downsample  %d %d\n",upsample, downsample);
 
+    return true;
 }
 
 void PianoNote::triggerOff()
@@ -695,6 +702,16 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
 { 
     int delta = 0;
 
+#ifdef FDN_REVERB
+    // Applied here rather than in setParameter() so the soundboard is only
+    // rebuilt once, after size, decay and lopass all have their values
+    if (soundboardDirty && soundboard)
+    {
+        soundboard->set (vals[pSoundboardSize], vals[pSoundboardDecay], vals[pSoundboardLopass]);
+        soundboardDirty = false;
+    }
+#endif
+
     PianoNote* v = voiceList;
     PianoNote* remove[NUM_NOTES];
 
@@ -728,11 +745,8 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
             PianoNote* v = noteArray[size_t(m.getNoteNumber())].get();
             if (m.isNoteOn())
             {
-                if (! (noteArray[size_t(m.getNoteNumber())]->isActive()))
-                    addVoice (v);
-
                 float velocity = vals[pMaxVelocity] * pow ((float)(m.getVelocity() / 127.0f), 2.0f);
-                v->triggerOn (velocity, nullptr);
+                triggerOn (m.getNoteNumber(), velocity, nullptr);
             }
             else
             {
@@ -750,8 +764,20 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
 void Piano::triggerOn (int note, float velocity, float* tune)
 {
     PianoNote* v = noteArray[size_t(note)].get();
-    addVoice (v);
-    v->triggerOn (velocity,tune);
+    if (v == nullptr)
+        return;
+
+    bool wasActive = v->isActive();
+
+    if (v->triggerOn (velocity, tune))
+    {
+        if (! wasActive)
+            addVoice (v);
+    }
+    else if (wasActive)
+    {
+        removeVoice (v);
+    }
 }
 
 //-----------------------------------------------------------------------------------------
@@ -805,9 +831,7 @@ void Piano::setParameter (int32_t index, float value)
             if (p.v != value)
             {
                 p.v = value;
-#ifdef FDN_REVERB
-                soundboard->set (vals[pSoundboardSize], vals[pSoundboardDecay], vals[pSoundboardLopass]);
-#endif
+                soundboardDirty = true;
             }
             break;
         case pStringDecay:
@@ -828,9 +852,7 @@ void Piano::setParameter (int32_t index, float value)
             if (std::abs (n - p.v) > 0.0001f)
             {
                 p.v = n;
-#ifdef FDN_REVERB
-                soundboard->set (vals[pSoundboardSize], vals[pSoundboardDecay], vals[pSoundboardLopass]);
-#endif
+                soundboardDirty = true;
             }
             break;
         }
@@ -840,9 +862,7 @@ void Piano::setParameter (int32_t index, float value)
             if (std::abs (n - p.v) > 0.0001f)
             {
                 p.v = n;
-#ifdef FDN_REVERB
-                soundboard->set (vals[pSoundboardSize], vals[pSoundboardDecay], vals[pSoundboardLopass]);
-#endif
+                soundboardDirty = true;
             }
             break;
         }
