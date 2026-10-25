@@ -314,10 +314,14 @@ PianoAudioProcessor::PianoAudioProcessor()
     params.add (addExtParam ("HammerCompliance", "Hammer Compliance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("HammerSpringConstant", "Hammer Spring Constant", "", "kg/s^2" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("HammerHysteresis", "Hammer Hysteresis", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("HammerPosition", "Hammer Position", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    // params is indexed by the engine's parameter enum (qiano.h), where Hammer
+    // Position comes after the impedances. Hosts see parameters in the order they
+    // are added here, so keep that and only put it into params at its enum slot.
+    auto hammerPosition = addExtParam ("HammerPosition", "Hammer Position", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction);
     params.add (addExtParam ("BridgeImpedance", "Bridge Impedance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("BridgeHorizontalImpedance", "Bridge Horizontal Impedance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("VerticalHorizontalImpedance", "Vertical Horizontal Impedance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (hammerPosition);
     params.add (addExtParam ("SoundboardSize", "Soundboard Size", "", "" , { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("StringDecay", "String Decay", "", "" , { 0.0f, 1.0f }, 0.25f, {0.0f}, conversionFunction));
     params.add (addExtParam ("StringLopass", "String Lopass", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
@@ -339,6 +343,10 @@ PianoAudioProcessor::PianoAudioProcessor()
     params.add (addExtParam ("Dwgs4", "Dwgs4", "", "" , { 0.0f, 1.0f }, 1.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("Downsample", "Downsample", "", "" , { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("LongModes", "Long Modes", "", "", { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
+
+    jassert (params.size() == NumParams);
+    jassert (params[pHammerPosition] == hammerPosition);
+    jassert (params[pBridgeImpedance]->getUid() == "BridgeImpedance");
 
     init();
 }
