@@ -109,9 +109,22 @@ public:
     Piano* piano = nullptr;
 
     bool isDone();
-    float maxEnergy = 0.0f;
-    float energy = 0.0f;
+
+    // isDone() compares the energy of the last second (a running sum: add the new
+    // sample's power, take away the one leaving the window) with the note's peak.
+    // It's double because float rounding left a residue above the 1e-8 threshold,
+    // so silent notes never finished.
+    double maxEnergy = 0.0;
+    double energy = 0.0;
     Delay<65536> outputdelay;
+
+    // Strings can settle with a constant offset (DC) on the bridge force. It's
+    // inaudible but never decays, so it kept notes alive (and using CPU) forever.
+    // Each note's output goes through a DC blocker before it's mixed or measured.
+    float blockDC (float x);
+    float dcR = 0.0f;
+    float dcX1 = 0.0f;
+    float dcY1 = 0.0f;
     static void fillFrequencyTable();
     static double freqTable[NUM_NOTES];
 

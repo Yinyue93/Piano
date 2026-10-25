@@ -237,6 +237,8 @@ float PianoNote::go()
     output = (tranForces[tTranRead] + tranForcesH[tTranRead]) * tranBridgeForce + /*longHP.filter*/(longTranForces[tTranRead] * longTranBridgeForce * v[pLongitudinalTransverseMix] + longForce * longBridgeForce * v[pLongitudinalMix]);
 
     //cout << output << "\n";
+    output = blockDC (output);
+
     float delayed = outputdelay.goDelay(output);
     energy = energy + output*output - delayed*delayed;
     if(energy>maxEnergy)
@@ -309,6 +311,13 @@ vec4 PianoNote::go4()
 
     vec4 output = simde_mm_add_ps (simde_mm_mul_ps (s1, simde_mm_broadcast_ss(&tranBridgeForce)), simde_mm_mul_ps (s2, simde_mm_broadcast_ss (&longMix)));
 
+    // The DC blocker is recursive, so it runs one sample at a time
+    alignas(16) float o[4];
+    simde_mm_store_ps (o, output);
+    for (auto& x : o)
+        x = blockDC (x);
+    output = simde_mm_load_ps (o);
+
     vec4 delayed = outputdelay.goDelay4(output);
     energy = energy + sum4 (simde_mm_sub_ps (simde_mm_mul_ps (output, output), simde_mm_mul_ps (delayed, delayed)));
     if(energy>maxEnergy)
@@ -318,6 +327,14 @@ vec4 PianoNote::go4()
     tTranRead = (tTranRead + 4)%TranBufferSize;
 
     return output;
+}
+
+float PianoNote::blockDC (float x)
+{
+    float y = x - dcX1 + dcR * dcY1;
+    dcX1 = x;
+    dcY1 = y;
+    return y;
 }
 
 void Piano::addVoice(PianoNote *v)
@@ -568,6 +585,9 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     this->downsample = downsample;
 
     float resample = (float)upsample / (float)downsample;
+
+    // DC blocker corner at 2 Hz, well below A0 (27.5 Hz)
+    dcR = 1.0f - float (TWOPI) * 2.0f / (resample * Fs);
     bridge.create(resample*Fs,
                   mBridge,kBridge,Zb,
                   mBridge,kBridge,ZbH,
