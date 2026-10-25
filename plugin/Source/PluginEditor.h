@@ -15,6 +15,9 @@ public:
     void resized() override;
 
 private:
+    juce::Rectangle<int> getBaseBounds() const;
+    void applyScale();
+
     PianoAudioProcessor& proc;
 
     juce::MidiKeyboardComponent keyboard { proc.keyState, juce::MidiKeyboardComponent::horizontalKeyboard };

@@ -43,6 +43,15 @@ PianoAudioProcessorEditor::PianoAudioProcessorEditor (PianoAudioProcessor& p_)
     }
 
     setGridSize (19, 4);
+
+    // Everything is laid out at the base size and scaled as a whole, so the
+    // window keeps the base aspect ratio while it is resized.
+    const auto base = getBaseBounds();
+    resizeLimits.setFixedAspectRatio (base.getWidth() / double (base.getHeight()));
+    makeResizable (base.getWidth() * 3 / 4, base.getHeight() * 3 / 4,
+                   base.getWidth() * 3,     base.getHeight() * 3);
+    setConstrainer (&resizeLimits);
+    setResizable (true, false);
 }
 
 PianoAudioProcessorEditor::~PianoAudioProcessorEditor()
@@ -50,9 +59,56 @@ PianoAudioProcessorEditor::~PianoAudioProcessorEditor()
 }
 
 //==============================================================================
+juce::Rectangle<int> PianoAudioProcessorEditor::getBaseBounds() const
+{
+    return { cols * cx + inset * 2 + extraWidthPx,
+             rows * cy + inset * 2 + headerHeight + extraHeightPx };
+}
+
+void PianoAudioProcessorEditor::applyScale()
+{
+    const auto base = getBaseBounds();
+    const auto scale = getWidth() / float (base.getWidth());
+    const auto t = juce::AffineTransform::scale (scale);
+
+    // ProcessorEditor::resized() placed these at the window size, put them
+    // back at the base size before scaling
+    if (titleBar != nullptr)
+    {
+        titleBar->setBounds (base.reduced (1).removeFromTop (headerHeight - 1));
+        titleBar->setTransform (t);
+    }
+
+    if (midiLearnOverlay != nullptr)
+    {
+        midiLearnOverlay->setBounds (base);
+        midiLearnOverlay->setTransform (t);
+    }
+
+    patchBrowser.setTransform (t);
+    keyboard.setTransform (t);
+
+    for (auto c : controls)
+        c->setTransform (t);
+}
+
 void PianoAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    ProcessorEditor::paint (g);
+    // Same as ProcessorEditor::paint(), with the header lines scaled
+    juce::ColourGradient grad (findColour (gin::PluginLookAndFeel::matte1ColourId), 0, 0,
+                               findColour (gin::PluginLookAndFeel::matte2ColourId), 0, float (getHeight()), false);
+
+    g.setGradientFill (grad);
+    g.fillAll();
+
+    const auto header = juce::roundToInt (headerHeight * getWidth() / float (getBaseBounds().getWidth()));
+
+    g.setColour (findColour (gin::PluginLookAndFeel::blackColourId));
+    g.fillRect (0, 0, getWidth(), 1);
+    g.fillRect (0, header, getWidth(), 1);
+
+    g.setColour (findColour (gin::PluginLookAndFeel::grey30ColourId));
+    g.fillRect (0, header + 1, getWidth(), 1);
 }
 
 void PianoAudioProcessorEditor::resized()
@@ -84,4 +140,6 @@ void PianoAudioProcessorEditor::resized()
             rc = r.removeFromLeft (w);
         }
     }
+
+    applyScale();
 }
