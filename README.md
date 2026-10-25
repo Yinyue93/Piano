@@ -40,9 +40,20 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
 - Handles *All Notes Off* and *All Sound Off* (CC 123 / 120), and resets voices when the
   host resets the plugin.
 - MIDI is no longer allocated per block on the audio thread.
+- Note-ons no longer allocate memory: every note's buffers are prepared when the host
+  starts audio (about 10 ms) and are only reused afterwards.
 - Fixed the *Hammer Position*, *Bridge Impedance*, *Bridge Horizontal Impedance* and
   *Vertical Horizontal Impedance* faders, which were driving the wrong parameters.
-- Parameter values are shown with readable precision.
+- Parameter values are shown with readable precision, and the unit labels are correct
+  (`x` marks a multiplier on the engine's per-note value).
+- *Soundboard Size* now works. It was disabled, and the soundboard's delay lines were
+  too short for the larger sizes.
+- *Long Modes* now works: **Normal** (the default, same sound as before) simulates
+  longitudinal string modes up to a quarter of the sample rate, **Full** up to Nyquist.
+  Full roughly doubles the CPU load, so it's better suited to offline rendering.
+- *String Tension* is hidden from the editor. The engine derives tension from the pitch,
+  string length and density, so it can't be set on its own. It stays a plugin parameter so
+  saved sessions still load.
 
 **Editor**
 - The editor window can be resized and scales uniformly.
@@ -50,6 +61,8 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
 **Tests**
 - New edge-case tests (upsampling cap; extreme settings at 22.05, 44.1, 96 and 192 kHz)
   and MIDI tests (All Notes Off / All Sound Off damp a held chord).
+- Parameter tests: Soundboard Size and Long Modes change the sound, and preparing notes
+  ahead of time doesn't.
 
 ## Building
 
@@ -135,7 +148,14 @@ cmake -B build -DBUILD_TESTS=ON
 cmake --build build --config Release --target PianoTests
 ```
 
-Then run the `PianoTests` executable from the build folder.
+Then run it with the reference renders folder as its argument, from the repository root:
+
+```bash
+build/tests/PianoTests_artefacts/Release/PianoTests tests/reference
+```
+
+Without the argument it looks in `reference/` under the current folder, and if the
+references aren't there it writes new ones instead of comparing.
 
 ### Test Suite
 
@@ -144,14 +164,17 @@ Then run the `PianoTests` executable from the build folder.
   reference renders in `tests/reference/`
 - **Edge Case Tests**: Upsampling limits and extreme parameter settings at several sample rates
 - **MIDI Tests**: All Notes Off / All Sound Off
+- **Parameter Tests**: Soundboard Size, Long Modes and note preparation
 
 ## Known limitations
 
-- *String Tension*, *Long Modes* and *Soundboard Size* are shown in the editor but currently
-  have no effect on the sound.
-- Some parameter unit labels don't match the values they show.
-- Changing string parameters while notes are playing can still allocate memory on the
+- If a parameter change makes a note need bigger buffers than it has used so far (for
+  example a longer *String Length*), the next strike of that note allocates once on the
   audio thread.
+- Moving *Soundboard Size* while notes ring can click, because the soundboard's delay
+  lines change length.
+- The soundboard's delay lengths are fixed in samples, so its character changes a little
+  with the sample rate.
 
 ## License
 

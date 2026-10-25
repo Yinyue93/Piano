@@ -130,7 +130,7 @@ static float userValue (int32_t index, float value)
             v = 1 + lrintf(value);
             break;
         case pLongModes:
-            v = 1 + lrintf(value);
+            v = 2 - lrintf(value);
             break;
     }
     return v;
@@ -140,7 +140,11 @@ static float userValue (int32_t index, float value)
 // ~7850), so a fixed number of decimals shows most of them as 0.0
 static juce::String formatUserValue (int32_t index, float v)
 {
-    if (index == pDwgs4 || index == pDownsample || index == pLongModes)
+    // Engine value 2 simulates longitudinal modes up to Fs/4, 1 up to Fs/2
+    if (index == pLongModes)
+        return v < 1.5f ? "Full" : "Normal";
+
+    if (index == pDwgs4 || index == pDownsample)
         return juce::String (juce::roundToInt (v));
 
     auto a = std::abs (v);
@@ -274,7 +278,7 @@ static float userValueInverse (int32_t index, float v)
             value = v - 1.0f;
             break;
         case pLongModes:
-            value = v - 1.0f;
+            value = 2.0f - v;
             break;
     }
     return juce::jlimit (0.0f, 1.0f, value);
@@ -302,25 +306,31 @@ PianoAudioProcessor::PianoAudioProcessor()
         if (auto v = std::get_if<float> (&in))
             return formatUserValue (idx, userValue (idx, *v));
 
-        return userValueInverse (idx, std::get<juce::String> (in).getFloatValue());
+        auto text = std::get<juce::String> (in);
+
+        if (idx == pLongModes && ! text.containsAnyOf ("0123456789"))
+            return text.trim().startsWithIgnoreCase ("f") ? 1.0f : 0.0f;
+
+        return userValueInverse (idx, text.getFloatValue());
     };
 
+    // Units: "x" marks a multiplier on the engine's per-note value (1 = as designed)
     params.add (addExtParam ("YoungsModulus", "Youngs Modulus", "", "GPa", { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("StringDensity", "String Density", "", "kg/m^3" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("HammerMass", "Hammer Mass", "", "kg" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("StringTension", "String Tension", "", "kg*m/s^2" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("StringLength", "String Length", "", "m" , { 0.0f, 1.0f }, 0.25f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("StringRadius", "String Radius", "", "m" , { 0.0f, 1.0f }, 0.25f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("HammerCompliance", "Hammer Compliance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("HammerSpringConstant", "Hammer Spring Constant", "", "kg/s^2" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("HammerHysteresis", "Hammer Hysteresis", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("HammerMass", "Hammer Mass", "", "x" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("StringTension", "String Tension", "", "N" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("StringLength", "String Length", "", "x" , { 0.0f, 1.0f }, 0.25f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("StringRadius", "String Radius", "", "x" , { 0.0f, 1.0f }, 0.25f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("HammerCompliance", "Hammer Compliance", "", "x" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("HammerSpringConstant", "Hammer Spring Constant", "", "x" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("HammerHysteresis", "Hammer Hysteresis", "", "x" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     // params is indexed by the engine's parameter enum (qiano.h), where Hammer
     // Position comes after the impedances. Hosts see parameters in the order they
     // are added here, so keep that and only put it into params at its enum slot.
     auto hammerPosition = addExtParam ("HammerPosition", "Hammer Position", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction);
-    params.add (addExtParam ("BridgeImpedance", "Bridge Impedance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("BridgeHorizontalImpedance", "Bridge Horizontal Impedance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("VerticalHorizontalImpedance", "Vertical Horizontal Impedance", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("BridgeImpedance", "Bridge Impedance", "", "kg/s" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("BridgeHorizontalImpedance", "Bridge Horizontal Impedance", "", "kg/s" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("VerticalHorizontalImpedance", "Vertical Horizontal Impedance", "", "kg/s" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (hammerPosition);
     params.add (addExtParam ("SoundboardSize", "Soundboard Size", "", "" , { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("StringDecay", "String Decay", "", "" , { 0.0f, 1.0f }, 0.25f, {0.0f}, conversionFunction));
@@ -337,9 +347,9 @@ PianoAudioProcessor::PianoAudioProcessor()
     params.add (addExtParam ("LongitudinalTransverseMix", "Longitudinal Transverse Mix", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("Volume", "Volume", "", "" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("MaxVelocity", "Max Velocity", "", "m/s" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("StringDetuning", "String Detuning", "", "%" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("StringDetuning", "String Detuning", "", "x" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("BridgeMass", "Bridge Mass", "", "kg" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
-    params.add (addExtParam ("BridgeSpring", "Bridge Spring", "", "kg/s^2" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
+    params.add (addExtParam ("BridgeSpring", "Bridge Spring", "", "N/m" , { 0.0f, 1.0f }, 0.5f, {0.0f}, conversionFunction));
     params.add (addExtParam ("Dwgs4", "Dwgs4", "", "" , { 0.0f, 1.0f }, 1.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("Downsample", "Downsample", "", "" , { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("LongModes", "Long Modes", "", "", { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
@@ -382,6 +392,12 @@ void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPer
 
     piano = std::make_unique<Piano>();
     piano->init (float (newSampleRate), interalBlockSize);
+
+    int idx = 0;
+    for (auto p : params)
+        piano->setParameter (idx++, p->getValue());
+
+    piano->prepareNotes();
 
 	sustainPedal.reset();
 

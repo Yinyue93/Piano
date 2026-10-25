@@ -193,6 +193,9 @@ private:
         }
         // Set volume to a reasonable level
         piano.setParameter(pVolume, 0.7f);
+        // The references were rendered when Soundboard Size had no effect,
+        // which is the same as its plugin default of 0
+        piano.setParameter(pSoundboardSize, 0.0f);
 
         // Calculate total duration
         float totalDuration = (NOTE_DURATION_SECONDS + SILENCE_BETWEEN_NOTES) * NUM_SCALE_NOTES + TAIL_SECONDS;
@@ -504,6 +507,9 @@ private:
             piano.setParameter(i, 0.5f);
         }
         piano.setParameter(pVolume, 0.7f);
+        // The references were rendered when Soundboard Size had no effect,
+        // which is the same as its plugin default of 0
+        piano.setParameter(pSoundboardSize, 0.0f);
 
         constexpr float CHORD_DURATION = 1.0f;
         constexpr float CHORD_SILENCE = 0.3f;
@@ -822,6 +828,9 @@ private:
             piano.setParameter(i, 0.5f);
         }
         piano.setParameter(pVolume, 0.6f); // Slightly lower volume for stress test
+        // The references were rendered when Soundboard Size had no effect,
+        // which is the same as its plugin default of 0
+        piano.setParameter(pSoundboardSize, 0.0f);
 
         constexpr float TEST_DURATION_SECONDS = 240.0f; // 4 minutes
         int totalSamples = static_cast<int>(TEST_DURATION_SECONDS * SAMPLE_RATE);
@@ -2277,6 +2286,129 @@ private:
     }
 };
 
+class PianoParameterTest
+{
+public:
+    bool run()
+    {
+        std::cout << "\nPiano Parameter Tests" << std::endl;
+        std::cout << "=====================" << std::endl;
+
+        bool allPassed = true;
+
+        allPassed &= testChangesSound ("Soundboard Size", pSoundboardSize, 0.0f, 1.0f);
+        allPassed &= testChangesSound ("Long Modes", pLongModes, 0.0f, 1.0f);
+        allPassed &= testPrepareNotesKeepsSound();
+
+        if (allPassed)
+            std::cout << "All parameter tests PASSED" << std::endl;
+        else
+            std::cerr << "Some parameter tests FAILED" << std::endl;
+
+        return allPassed;
+    }
+
+private:
+    // These parameters used to be ignored by the engine. Both settings must
+    // render a sane chord, and the two renders must differ.
+    bool testChangesSound (const char* name, int param, float a, float b)
+    {
+        std::cout << "  Testing " << name << "..." << std::endl;
+
+        auto renderA = renderChord (param, a, false);
+        auto renderB = renderChord (param, b, false);
+
+        double diff = 0.0, ref = 0.0;
+        float peak = 0.0f;
+        bool finite = true;
+
+        for (size_t i = 0; i < renderA.size(); i++)
+        {
+            finite = finite && std::isfinite (renderA[i]) && std::isfinite (renderB[i]);
+            diff += double (renderA[i] - renderB[i]) * (renderA[i] - renderB[i]);
+            ref  += double (renderA[i]) * renderA[i];
+            peak = std::max ({ peak, std::abs (renderA[i]), std::abs (renderB[i]) });
+        }
+
+        double relDiff = std::sqrt (diff / std::max (ref, 1e-20));
+        std::cout << "    Relative difference: " << relDiff << ", peak: " << peak << std::endl;
+
+        if (! finite || peak > 4.0f || ref <= 0.0)
+        {
+            std::cerr << "    FAILED: " << name << " produced invalid output" << std::endl;
+            return false;
+        }
+
+        if (relDiff < 0.01)
+        {
+            std::cerr << "    FAILED: " << name << " doesn't change the sound" << std::endl;
+            return false;
+        }
+
+        std::cout << "    " << name << ": PASSED" << std::endl;
+        return true;
+    }
+
+    // prepareNotes() runs every note's setup ahead of time. It must not leave
+    // anything behind that changes what the notes sound like.
+    bool testPrepareNotesKeepsSound()
+    {
+        std::cout << "  Testing prepareNotes()..." << std::endl;
+
+        auto plain    = renderChord (pVolume, 0.7f, false);
+        auto prepared = renderChord (pVolume, 0.7f, true);
+
+        float maxDiff = 0.0f;
+        for (size_t i = 0; i < plain.size(); i++)
+            maxDiff = std::max (maxDiff, std::abs (plain[i] - prepared[i]));
+
+        std::cout << "    Max difference: " << maxDiff << std::endl;
+
+        if (maxDiff > 1.0e-6f)
+        {
+            std::cerr << "    FAILED: prepareNotes() changed the output" << std::endl;
+            return false;
+        }
+
+        std::cout << "    prepareNotes(): PASSED" << std::endl;
+        return true;
+    }
+
+    // Renders 1 s of a held chord with one parameter changed from 0.5
+    static std::vector<float> renderChord (int param, float value, bool prepare)
+    {
+        Piano piano;
+        piano.init (SAMPLE_RATE, BLOCK_SIZE);
+
+        for (int i = 0; i < NumParams; i++)
+            piano.setParameter (i, 0.5f);
+
+        piano.setParameter (param, value);
+
+        if (prepare)
+            piano.prepareNotes();
+
+        std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE), out;
+        float* channels[2] = { left.data(), right.data() };
+
+        int numBlocks = int (SAMPLE_RATE) / BLOCK_SIZE;
+
+        for (int b = 0; b < numBlocks; b++)
+        {
+            juce::MidiBuffer midi;
+
+            if (b == 0)
+                for (int note : { 36, 48, 60, 64, 67, 76 })
+                    midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+
+            piano.process (channels, BLOCK_SIZE, midi);
+            out.insert (out.end(), left.begin(), left.end());
+        }
+
+        return out;
+    }
+};
+
 // Benchmark configuration
 constexpr float BENCHMARK_SAMPLE_RATE = 44100.0f;
 constexpr int BENCHMARK_BLOCK_SIZE = 512;
@@ -2487,7 +2619,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "FilterUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 1/7] Running Filter Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 1/8] Running Filter Unit Tests..." << std::endl;
 
         FilterUnitTest test;
         testsRun++;
@@ -2506,7 +2638,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "HammerUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 2/7] Running Hammer Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 2/8] Running Hammer Unit Tests..." << std::endl;
 
         HammerUnitTest test;
         testsRun++;
@@ -2525,7 +2657,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "MSD2FilterUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 3/7] Running MSD2Filter Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 3/8] Running MSD2Filter Unit Tests..." << std::endl;
 
         MSD2FilterUnitTest test;
         testsRun++;
@@ -2544,7 +2676,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "ResampleFIRUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 4/7] Running ResampleFIR Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 4/8] Running ResampleFIR Unit Tests..." << std::endl;
 
         ResampleFIRUnitTest test;
         testsRun++;
@@ -2563,7 +2695,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "DWGSUnitTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 5/7] Running DWGS Unit Tests..." << std::endl;
+        std::cout << "\n[Unit 5/8] Running DWGS Unit Tests..." << std::endl;
 
         DWGSUnitTest test;
         testsRun++;
@@ -2582,7 +2714,7 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "PianoEdgeCaseTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 6/7] Running Edge Case Tests..." << std::endl;
+        std::cout << "\n[Unit 6/8] Running Edge Case Tests..." << std::endl;
 
         PianoEdgeCaseTest test;
         testsRun++;
@@ -2601,9 +2733,28 @@ int main(int argc, char* argv[])
     {
         g_currentTestName = "PianoMidiTest";
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 7/7] Running MIDI Tests..." << std::endl;
+        std::cout << "\n[Unit 7/8] Running MIDI Tests..." << std::endl;
 
         PianoMidiTest test;
+        testsRun++;
+        if (test.run())
+        {
+            testsPassed++;
+        }
+        else
+        {
+            testsFailed++;
+            allPassed = false;
+        }
+    }
+
+    // Unit Test 8: Parameters that used to be ignored, and note preparation
+    {
+        g_currentTestName = "PianoParameterTest";
+        g_currentTestPhase = "running";
+        std::cout << "\n[Unit 8/8] Running Parameter Tests..." << std::endl;
+
+        PianoParameterTest test;
         testsRun++;
         if (test.run())
         {

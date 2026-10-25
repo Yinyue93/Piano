@@ -35,7 +35,6 @@ void Reverb::set (float size, float c1, float c3)
     for(int k=0;k<ReverbTaps;k++)
     {
         lengths[k] = allLengths[lrintf(s * k)];
-        lengths[k] = allLengths[k];
     }
     for(int k=0;k<ReverbTaps;k++)
     {

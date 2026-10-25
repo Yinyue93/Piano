@@ -63,7 +63,8 @@ protected:
     static int allLengths[NumLengths];
     int lengths[ReverbTaps];
     float Fs;
-    Delay<1024> d[ReverbTaps];
+    // Long enough for the biggest soundboard (allLengths goes up to 3013)
+    Delay<4096> d[ReverbTaps];
     float o[ReverbTaps];
     float b[ReverbTaps];
     float c[ReverbTaps];

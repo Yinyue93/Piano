@@ -389,6 +389,24 @@ void Piano::init (float Fs_, int blockSize_)
 #endif
 }
 
+// Setting a note up allocates its string buffers (they only grow) and creates
+// its resampling filters, which also allocates. Doing it once per note here
+// means note-ons on the audio thread don't touch the heap, unless parameters
+// change later in a way that needs bigger buffers.
+void Piano::prepareNotes()
+{
+    for (int k = PIANO_MIN_NOTE; k <= PIANO_MAX_NOTE; k++)
+    {
+        auto& note = noteArray[size_t (k)];
+
+        if (note && ! note->isActive())
+        {
+            note->triggerOn (1.0f, nullptr);
+            note->deActivate();
+        }
+    }
+}
+
 Piano::Piano()
 {
 }
@@ -540,9 +558,9 @@ bool PianoNote::triggerOn (float velocity, float* tune)
 
     int upsampleMin = 1;
     int downsample = (int)lrintf(v[pDownsample]);
+    // 2 keeps the longitudinal modes below a quarter of the sample rate, 1 goes
+    // up to Nyquist (more partials, more CPU)
     int longmodes = (int)lrintf(v[pLongModes]);
-
-    longmodes = 2;
     /*
      if(note < 45) {
      downsample = 2;
@@ -635,12 +653,10 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     longHP.create (0.15f * downsample, 0.5f);
 
     // XXX should only create once
-    if(downSampleFilter.isCreated())
-    {
-        upSampleDelayNeeded = 0;
-        downSampleDelayNeeded = 0;
-    }
-    else
+    // The filters' latency is skipped once, the first time the note renders.
+    // Later strikes leave the counters alone: they're already 0 once it has
+    // rendered, and still pending if prepareNotes() set the note up early.
+    if (! downSampleFilter.isCreated())
     {
         downSampleFilter.create(upsample);
         upSampleFilter.create(downsample);
@@ -948,7 +964,8 @@ void Piano::setParameter (int32_t index, float value)
             p.v = 1 + lrintf(value);
             break;
         case pLongModes:
-            p.v = 1 + lrintf(value);
+            // 0 (the default) is the engine's original setting of 2
+            p.v = 2 - lrintf(value);
             break;
     }
 }

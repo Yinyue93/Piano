@@ -191,6 +191,9 @@ public:
     void process (float **out, int frameSamples, int offset);
     void process (float **out, int frameSamples, juce::MidiBuffer&);
     void init (float Fs, int blockSize);
+    // Sizes every note's buffers for the current parameters. Call it after
+    // init() and setParameter(), off the audio thread.
+    void prepareNotes();
     void triggerOn (int note, float velocity, float *tune);
     void allNotesOff();
 

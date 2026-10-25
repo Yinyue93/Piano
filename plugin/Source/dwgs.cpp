@@ -386,10 +386,10 @@ bool dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, f
 
     //logf("%d %d %d %d %g %g\n", del0, del1, del2, del3, delta, delta2);
 
-    wave0.allocate(size_t(delTab + 32));
-    wave1.allocate(size_t(delTab + 32));
-    wave.allocate(size_t(delTab + 32));
-    Fl.allocate(size_t(delTab + 32));
+    wave0.ensureSize(size_t(delTab + 32));
+    wave1.ensureSize(size_t(delTab + 32));
+    wave.ensureSize(size_t(delTab + 32));
+    Fl.ensureSize(size_t(delTab + 32));
     wave0.clear();
     wave1.clear();
     Fl.clear();
@@ -418,7 +418,7 @@ bool dwgs::set(float Fs, int longmodes, int downsample, int upsample, float f, f
 #endif
         if(delTab) {
             float n = float (PI) * k / delHalf;
-            modeTable[size_t(k)].allocate(size_t(delTab + 8));
+            modeTable[size_t(k)].ensureSize(size_t(delTab + 8));
 
             for (int i = 0; i <= delTab; i++)
             {

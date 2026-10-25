@@ -36,6 +36,11 @@ PianoAudioProcessorEditor::PianoAudioProcessorEditor (PianoAudioProcessor& p_)
 
     for (auto pp : proc.getPluginParameters())
     {
+        // The engine derives tension from pitch, length and density, so this
+        // fader can't do anything. It stays a parameter so old sessions load.
+        if (pp->getUid() == "StringTension")
+            continue;
+
         auto pc = std::make_unique<PianoHorizontalFader> (pp, false);
 
         addAndMakeVisible (pc.get());

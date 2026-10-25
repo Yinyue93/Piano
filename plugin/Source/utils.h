@@ -68,6 +68,14 @@ public:
         return *this;
     }
 
+    // Like allocate(), but keeps the current memory when it's already big
+    // enough, so it doesn't touch the heap on the audio thread once sized
+    void ensureSize(size_t count)
+    {
+        if (count > size_)
+            allocate(count);
+    }
+
     void allocate(size_t count)
     {
         deallocate();
