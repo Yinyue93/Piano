@@ -3,6 +3,22 @@
 Changes made in this fork of [FigBug/Piano](https://github.com/FigBug/Piano). The upstream
 release history is in [Changelist.txt](Changelist.txt).
 
+**Stereo width**
+- Added a saved, automatable Stereo Width fader with bass-left/treble-right
+  placement and quiet, filtered early reflections for all three voicings.
+- Width changes ramp over 30 ms. Mono fold-down preserves the original signal;
+  old presets and sessions retain their sound with a 0% default.
+- Stereo body and reflection buffers are prepared before playback and cleared
+  on reset and All Sound Off without audio-thread allocations.
+
+**Warm piano presets**
+- Added Warm Body and Warm Body + Detail presets, preserving the approved
+  convolution-body auditions. The Detail preset adds upper-harmonic EQ and
+  a faster per-note initial decay. Presets and sessions retain their voicing;
+  existing state without it still uses the original model.
+- The convolution uses short head and larger tail partitions for live playing.
+  Reset and All Sound Off clear its history without allocating or losing the IR.
+
 **Crashes and audio-thread safety**
 - Fixed a heap overflow in the string model at high sample rates or extreme settings
   (the upsampling factor could exceed what the dispersion filters support).

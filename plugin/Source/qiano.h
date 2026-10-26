@@ -19,12 +19,14 @@ const int NUM_NOTES = 128;    // 128 midi notes
 #include "dwgs.h"
 #include "reverb.h"
 #include "hammer.h"
+#include "PianoVoicing.h"
+#include "PianoStereo.h"
 
 enum {
     MaxDecimation = 16,
     MaxLongDelay = 16,
     TranBufferSize = 32,
-    NumParams = 34
+    NumParams = 35
 };
 
 class Param
@@ -79,7 +81,8 @@ enum parameters {
     pBridgeSpring,
     pDwgs4,
     pDownsample,
-    pLongModes
+    pLongModes,
+    pStereoWidth
 };
 
 int getParameterIndex(const char *key);
@@ -147,6 +150,9 @@ protected:
     // Zeroes everything the strings, filters and resamplers remember
     void clearState();
     bool needsClear = false;
+
+    double earlyTransient = 0.55, earlyGain = 1.0;
+    double earlyStep = 1.0, earlySmoothing = 1.0;
 
     MSD2Filter bridge;
 
@@ -220,6 +226,9 @@ public:
     // and the soundboard is cleared. Doesn't allocate.
     void reset();
 
+    void setVoicing (int mode);
+    int getVoicing() const { return voicingMode; }
+
     // MIDI channels share the piano, as several players would share one: a
     // key sounds while any channel holds it down, so a note off only stops a
     // note once no other channel holds that key. Channels are 1 - 16.
@@ -253,12 +262,19 @@ protected:
     int blockSize = 0;
     float Fs = 0.0f;
     std::vector<float> input;
+    std::vector<float> side;
     bool soundboardDirty = true;
+    int voicingMode = PianoVoicing::classic;
+    PianoVoicing voicing;
+    PianoVoicing sideVoicing;
+    PianoStereo stereo;
 
 #ifdef FDN_REVERB
     std::unique_ptr<Reverb> soundboard;
+    std::unique_ptr<Reverb> sideSoundboard;
 #else
     std::unique_ptr<ConvolveReverb<revSize>> soundboard;
+    std::unique_ptr<ConvolveReverb<revSize>> sideSoundboard;
 #endif
 };
 

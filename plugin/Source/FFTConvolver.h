@@ -77,6 +77,9 @@ public:
      * @brief Resets the convolver and discards the set impulse response
      */
     void reset();
+
+    // Retain the impulse response and storage, clearing only audio history.
+    void clearHistory();
     
 private:
     size_t _blockSize;

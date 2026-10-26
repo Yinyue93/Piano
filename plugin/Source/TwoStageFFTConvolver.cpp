@@ -67,6 +67,20 @@ void TwoStageFFTConvolver::reset()
 }
 
 
+void TwoStageFFTConvolver::clearHistory()
+{
+    if (_headBlockSize == 0) return;
+    waitForBackgroundProcessing();
+    _headConvolver.clearHistory();
+    _tailConvolver0.clearHistory();
+    _tailConvolver.clearHistory();
+    for (auto* buffer : { &_tailOutput0, &_tailPrecalculated0, &_tailOutput,
+                          &_tailPrecalculated, &_tailInput, &_backgroundProcessingInput })
+        if (buffer->size() > 0) buffer->setZero();
+    _tailInputFill = 0;
+    _precalculatedPos = 0;
+}
+
 bool TwoStageFFTConvolver::init(size_t headBlockSize,
                                 size_t tailBlockSize,
                                 const Sample* ir,

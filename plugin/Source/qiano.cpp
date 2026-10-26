@@ -60,7 +60,8 @@ Param params[NumParams] =
     { pBridgeSpring, "kb", "kg/s^2" },
     { pDwgs4, "dwgs4", "" },
     { pDownsample, "downsample", "" },
-    { pLongModes, "longmodes", "" }
+    { pLongModes, "longmodes", "" },
+    { pStereoWidth, "stereowidth", "%" }
 };
 
 int getParameterIndex (const char *key)
@@ -106,6 +107,12 @@ float PianoNote::goUp()
 
     float out = goUpDelayed();
     measureEnergy (out);
+    if (piano->getVoicing() == PianoVoicing::warmDetail)
+    {
+        earlyGain += earlySmoothing * (0.45 + earlyTransient - earlyGain);
+        earlyTransient *= earlyStep;
+        out *= float (earlyGain);
+    }
     return out;
 }
 
@@ -380,12 +387,20 @@ void Piano::init (float Fs_, int blockSize_)
         noteArray[k] = std::make_unique<PianoNote>(k, int (Fs), this);
 
     input.resize(size_t (blockSize));
+    side.resize (size_t (blockSize));
+    voicing.prepare (Fs);
+    sideVoicing.prepare (Fs);
+    stereo.prepare (Fs);
+    stereo.setWidth (vals[pStereoWidth]);
+    stereo.clear();
 
 #ifdef FDN_REVERB
     soundboard = std::make_unique<Reverb>(Fs);
+    sideSoundboard = std::make_unique<Reverb>(Fs);
     soundboardDirty = true;
 #else
     soundboard = std::make_unique<ConvolveReverb<revSize>>(blockSize);
+    sideSoundboard = std::make_unique<ConvolveReverb<revSize>>(blockSize);
 #endif
 }
 
@@ -727,6 +742,13 @@ bool PianoNote::triggerOn (float velocity, float* tune)
         downSampleDelayNeeded = downSampleFilter.getDelay() / upsample;
     }
 
+    if (piano->getVoicing() == PianoVoicing::warmDetail)
+    {
+        earlyTransient = 0.55;
+        if (! bActive) earlyGain = 1.0;
+        earlyStep = std::exp (-1.0 / (double (Fs) * 0.180));
+        earlySmoothing = 1.0 - std::exp (-1.0 / (double (Fs) * 0.004));
+    }
     bActive = true;
 
     //logf("upsample/downsample  %d %d\n",upsample, downsample);
@@ -780,6 +802,8 @@ void PianoNote::clearState()
 
     dcX1 = 0.0f;
     dcY1 = 0.0f;
+    earlyTransient = 0.55;
+    earlyGain = 1.0;
     resetEnergy();
 }
 
@@ -802,15 +826,32 @@ void Piano::process (float* out, int samples)
     // span for one voice while its strings and filters are still in cache.
     // Each output sample retains the original voice summation order.
     std::fill_n (out, samples, 0.0f);
+    std::fill_n (side.data(), samples, 0.0f);
     auto* v = voiceList;
     if (v)
     {
         do
         {
+            const float pan = PianoStereo::notePosition (v->note);
             for (int i = 0; i < samples; ++i)
-                out[i] += v->goUp();
+            {
+                const float sample = v->goUp();
+                out[i] += sample;
+                side[size_t (i)] += pan * sample;
+            }
             v = v->next;
         } while (v && v != voiceList);
+    }
+
+    if (voicingMode != PianoVoicing::classic)
+    {
+        for (int i = 0; i < samples; ++i)
+            input[size_t (i)] = vals[pVolume] * out[i];
+        voicing.process (input.data(), out, samples, voicingMode);
+        for (int i = 0; i < samples; ++i)
+            input[size_t (i)] = vals[pVolume] * side[size_t (i)];
+        sideVoicing.process (input.data(), side.data(), samples, voicingMode);
+        return;
     }
 
     for (int i = 0; i < samples; ++i)
@@ -818,6 +859,7 @@ void Piano::process (float* out, int samples)
         const float output = out[i];
 #ifdef FDN_REVERB
         out[i] = vals[pVolume] * soundboard->reverb(output);
+        side[size_t (i)] = vals[pVolume] * sideSoundboard->reverb (side[size_t (i)]);
 #else
         out[i] = vals[pVolume] * output;
         input[size_t(i)] = vals[pVolume] * output;
@@ -825,13 +867,18 @@ void Piano::process (float* out, int samples)
     }
 #ifndef FDN_REVERB
     soundboard->fft_conv(input.data(), out, samples);
+    for (int i = 0; i < samples; ++i)
+        input[size_t (i)] = vals[pVolume] * side[size_t (i)];
+    sideSoundboard->fft_conv (input.data(), side.data(), samples);
 #endif
 }
 
 void Piano::process (float** out, int samples, int offset)
 {
     process (out[0] + offset, samples);
-    memcpy (out[1] + offset, out[0] + offset, size_t (samples) * sizeof (float));
+    stereo.setWidth (vals[pStereoWidth]);
+    for (int i = 0; i < samples; ++i)
+        stereo.process (out[0][offset + i], side[size_t (i)], out[0][offset + i], out[1][offset + i]);
 }
 
 void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
@@ -844,6 +891,7 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
     if (soundboardDirty && soundboard)
     {
         soundboard->set (vals[pSoundboardSize], vals[pSoundboardDecay], vals[pSoundboardLopass]);
+        sideSoundboard->set (vals[pSoundboardSize], vals[pSoundboardDecay], vals[pSoundboardLopass]);
         soundboardDirty = false;
     }
 #endif
@@ -1001,6 +1049,25 @@ void Piano::allSoundOff (int channel)
     if (voiceList == nullptr && soundboard)
         soundboard->clear();
 #endif
+    if (voiceList == nullptr)
+    {
+        voicing.clear();
+        sideVoicing.clear();
+        stereo.clear();
+#ifdef FDN_REVERB
+        if (sideSoundboard) sideSoundboard->clear();
+#endif
+    }
+}
+
+void Piano::setVoicing (int mode)
+{
+    mode = std::clamp (mode, int (PianoVoicing::classic), int (PianoVoicing::warmDetail));
+    if (mode != voicingMode)
+    {
+        reset();
+        voicingMode = mode;
+    }
 }
 
 void Piano::reset()
@@ -1014,10 +1081,15 @@ void Piano::reset()
 
     keysDown.fill (0);
     soundingFrom.fill (0);
+    voicing.clear();
+    sideVoicing.clear();
+    stereo.clear();
 
 #ifdef FDN_REVERB
     if (soundboard)
         soundboard->clear();
+    if (sideSoundboard)
+        sideSoundboard->clear();
 #endif
 }
 
@@ -1169,6 +1241,9 @@ void Piano::setParameter (int32_t index, float value)
         case pLongModes:
             // 0 (the default) is the engine's original setting of 2
             p.v = 2 - lrintf(value);
+            break;
+        case pStereoWidth:
+            p.v = std::isfinite (value) ? std::clamp (value, 0.0f, 1.0f) : 0.0f;
             break;
     }
 }

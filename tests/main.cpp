@@ -5,6 +5,7 @@
 #include "dwgs.h"
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "../modules/gin/modules/gin_standaloneplugin/standaloneplugin/gin_sidebarlayout.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -478,7 +479,7 @@ private:
         // Set default parameters (mid-range values for consistent output)
         for (int i = 0; i < NumParams; i++)
         {
-            piano.setParameter(i, 0.5f);
+            piano.setParameter(i, i == pStereoWidth ? 0.0f : 0.5f);
         }
         // Set volume to a reasonable level
         piano.setParameter(pVolume, REFERENCE_VOLUME);
@@ -608,7 +609,7 @@ private:
 
         for (int i = 0; i < NumParams; i++)
         {
-            piano.setParameter(i, 0.5f);
+            piano.setParameter(i, i == pStereoWidth ? 0.0f : 0.5f);
         }
         piano.setParameter(pVolume, REFERENCE_VOLUME);
         // The references were rendered when Soundboard Size had no effect,
@@ -754,7 +755,7 @@ private:
 
         for (int i = 0; i < NumParams; i++)
         {
-            piano.setParameter(i, 0.5f);
+            piano.setParameter(i, i == pStereoWidth ? 0.0f : 0.5f);
         }
         piano.setParameter(pVolume, REFERENCE_VOLUME);
         // The references were rendered when Soundboard Size had no effect,
@@ -2171,7 +2172,7 @@ private:
             piano.init (SAMPLE_RATE, BLOCK_SIZE);
 
             for (int i = 0; i < NumParams; i++)
-                piano.setParameter (i, 0.5f);
+                piano.setParameter (i, i == pStereoWidth ? 0.0f : 0.5f);
 
             piano.setParameter (pDwgs4, dwgs4);
 
@@ -2227,7 +2228,7 @@ private:
             piano.init (SAMPLE_RATE, BLOCK_SIZE);
 
             for (int i = 0; i < NumParams; i++)
-                piano.setParameter (i, 0.5f);
+                piano.setParameter (i, i == pStereoWidth ? 0.0f : 0.5f);
 
             std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE), out;
             float* channels[2] = { left.data(), right.data() };
@@ -2283,7 +2284,7 @@ private:
         piano.init (SAMPLE_RATE, BLOCK_SIZE);
 
         for (int i = 0; i < NumParams; i++)
-            piano.setParameter (i, 0.5f);
+            piano.setParameter (i, i == pStereoWidth ? 0.0f : 0.5f);
 
         std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE);
         float* channels[2] = { left.data(), right.data() };
@@ -2516,7 +2517,7 @@ private:
         piano.init (Fs, BLOCK_SIZE);
 
         for (int i = 0; i < NumParams; i++)
-            piano.setParameter (i, 0.5f);
+            piano.setParameter (i, i == pStereoWidth ? 0.0f : 0.5f);
 
         for (auto [param, value] : from)
             piano.setParameter (param, value);
@@ -2588,7 +2589,7 @@ private:
         piano.init (SAMPLE_RATE, BLOCK_SIZE);
 
         for (int i = 0; i < NumParams; i++)
-            piano.setParameter (i, 0.5f);
+            piano.setParameter (i, i == pStereoWidth ? 0.0f : 0.5f);
 
         for (auto [param, value] : changes)
             piano.setParameter (param, value);
@@ -2664,7 +2665,7 @@ private:
         piano.init (Fs, BLOCK_SIZE);
 
         for (int i = 0; i < NumParams; i++)
-            piano.setParameter (i, 0.5f);
+            piano.setParameter (i, i == pStereoWidth ? 0.0f : 0.5f);
 
         for (auto [index, value] : params)
             piano.setParameter (index, value);
@@ -2838,7 +2839,7 @@ private:
             piano.init (SAMPLE_RATE, BLOCK_SIZE);
 
             for (int i = 0; i < NumParams; i++)
-                piano.setParameter (i, 0.5f);
+                piano.setParameter (i, i == pStereoWidth ? 0.0f : 0.5f);
 
             std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE), out;
             float* channels[2] = { left.data(), right.data() };
@@ -2903,6 +2904,9 @@ public:
         allPassed &= testMidiFlood();
         allPassed &= testNoAllocations();
         allPassed &= testPlayhead();
+        allPassed &= testSidebarLayout();
+        allPassed &= testVoicingPresets();
+        allPassed &= testStereoWidth();
 
         if (allPassed)
             std::cout << "All processor tests PASSED" << std::endl;
@@ -2913,6 +2917,259 @@ public:
     }
 
 private:
+    bool testStereoWidth()
+    {
+        std::cout << "  Testing stereo placement, mono fold-down, automation and state..." << std::endl;
+        using Frame = std::array<float, 2>;
+        auto render = [] (PianoAudioProcessor& proc, int note, const std::vector<int>& sizes)
+        {
+            constexpr int length = 12288;
+            std::vector<Frame> result (length);
+            juce::AudioBuffer<float> audio (2, 1024);
+            juce::MidiBuffer midi;
+            midi.ensureSize (1024);
+            int position = 0, block = 0;
+            while (position < length)
+            {
+                const int count = std::min (sizes[size_t (block++) % sizes.size()], length - position);
+                audio.setSize (2, count, false, false, true);
+                midi.clear();
+                if (position == 0) midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 90), 0);
+                g_allocationCount = 0;
+                t_countAllocations = true;
+                proc.processBlock (audio, midi);
+                t_countAllocations = false;
+                if (g_allocationCount.load() != 0) return std::vector<Frame>();
+                for (int i = 0; i < count; ++i)
+                    result[size_t (position + i)] = { audio.getSample (0, i), audio.getSample (1, i) };
+                position += count;
+            }
+            return result;
+        };
+
+        for (double rate : { 44100.0, 48000.0, 96000.0 })
+            for (int mode : { 0, 1, 2 })
+            {
+                auto mono = createProcessor (64);
+                auto wide = createProcessor (64);
+                for (auto* proc : { mono.get(), wide.get() })
+                {
+                    proc->setVoicing (mode);
+                    proc->setRateAndBufferSizeDetails (rate, 64);
+                    proc->prepareToPlay (rate, 64);
+                }
+                auto* parameter = wide->getPluginParameters().getLast();
+                parameter->setValue (1.0f);
+                for (int note : { 36, 60, 96 })
+                {
+                    mono->reset();
+                    wide->reset();
+                    auto a = render (*mono, note, { 64 });
+                    auto b = render (*wide, note, { 7, 101, 512, 3 });
+                    if (a.empty() || b.empty()) return false;
+                    double left = 0.0, right = 0.0, difference = 0.0;
+                    for (size_t i = 0; i < a.size(); ++i)
+                    {
+                        if (a[i][0] != a[i][1] || ! std::isfinite (b[i][0]) || ! std::isfinite (b[i][1])) return false;
+                        if (std::abs (0.5f * (b[i][0] + b[i][1]) - a[i][0]) > 1e-6f * std::max (1.0f, std::abs (a[i][0]))) return false;
+                        left += double (b[i][0]) * b[i][0];
+                        right += double (b[i][1]) * b[i][1];
+                        difference += std::abs (b[i][0] - b[i][1]);
+                    }
+                    if (difference < 1e-5 || (note < 60 && left <= right) || (note > 60 && right <= left)) return false;
+
+                    // Reset must clear both body paths and the reflection taps.
+                    wide->reset();
+                    auto c = render (*wide, note, { 64 });
+                    wide->reset();
+                    auto d = render (*wide, note, { 1, 17, 251, 64 });
+                    if (c != d) return false;
+                }
+
+                juce::AudioBuffer<float> audio (2, 64);
+                juce::MidiBuffer midi;
+                midi.ensureSize (1024);
+                // Turning width off on a held note must reach exact dual mono.
+                parameter->setValue (0.0f);
+                for (int i = 0; i < 64; ++i) wide->processBlock (audio, midi);
+                for (int i = 0; i < 64; ++i)
+                    if (audio.getSample (0, i) != audio.getSample (1, i)) return false;
+                parameter->setValue (1.0f);
+                for (int i = 0; i < 64; ++i) wide->processBlock (audio, midi);
+                midi.addEvent (juce::MidiMessage::allSoundOff (1), 0);
+                wide->processBlock (audio, midi);
+                for (int i = 0; i < 128; ++i)
+                {
+                    wide->processBlock (audio, midi);
+                    if (audio.getMagnitude (0, 64) != 0.0f) return false;
+                }
+
+                parameter->setValue (0.6f);
+                if (parameter->getText (0.6f, 32) != "60" || std::abs (parameter->getValueForText ("60") - 0.6f) > 1e-6f) return false;
+                juce::MemoryBlock saved;
+                wide->getStateInformation (saved);
+                mono->setStateInformation (saved.getData(), int (saved.getSize()));
+                if (mono->getPluginParameters().getLast()->getValue() != 0.6f) return false;
+                const juce::String legacy = "<state><state/></state>";
+                mono->setStateInformation (legacy.toRawUTF8(), legacy.getNumBytesAsUTF8());
+                if (mono->getPluginParameters().getLast()->getValue() != 0.0f) return false;
+            }
+
+        // Check the actual smoothing with a constant mid/side input: no step,
+        // no overshoot, and an exact mono endpoint after the 30 ms ramp.
+        PianoStereo spatial;
+        spatial.prepare (48000.0);
+        spatial.setWidth (1.0f);
+        float previous = 0.0f;
+        for (int i = 0; i < 1440; ++i)
+        {
+            float l, r;
+            spatial.process (0.0f, 1.0f, l, r);
+            if (r < previous || r - previous > 0.001f || l != -r) return false;
+            previous = r;
+        }
+        if (previous != 1.0f) return false;
+        std::cout << "    Stereo width: PASSED" << std::endl;
+        return true;
+    }
+
+    bool testSidebarLayout()
+    {
+        std::cout << "  Testing spectrum visibility in the standalone sidebar..." << std::endl;
+
+        // Piano's base height is 328, and its smallest editor is 246 high.
+        // Exercise the real viewport's scroll range at both sizes and above
+        // the height where every section fits without scrolling.
+        for (int height : { 246, 328, 460, 800, 984 })
+        {
+            juce::Component content;
+            juce::Viewport viewport;
+            viewport.setViewedComponent (&content, false);
+            viewport.setScrollBarsShown (true, false);
+            viewport.setSize (200, height);
+
+            auto layout = gin::SidebarLayout::create (200, true, false, true);
+            const int width = 200 - (layout.height > height ? viewport.getScrollBarThickness() : 0);
+            layout = gin::SidebarLayout::create (width, true, false, true);
+            content.setSize (width, std::max (height, layout.height));
+
+            if (layout.spectrum.isEmpty() || ! viewport.getViewArea().contains (layout.spectrum))
+            {
+                std::cerr << "    FAILED: Spectrum is not initially visible at height " << height << std::endl;
+                return false;
+            }
+
+            int previousBottom = 0;
+            for (auto bounds : { layout.midi, layout.spectrum, layout.scope, layout.xy, layout.record, layout.output })
+            {
+                if (bounds.isEmpty() || ! content.getLocalBounds().contains (bounds) || bounds.getY() < previousBottom)
+                    return false;
+                previousBottom = bounds.getBottom();
+            }
+
+            viewport.setViewPosition (0, layout.height);
+            if (! viewport.getViewArea().contains (layout.output) || viewport.getViewPositionX() != 0)
+            {
+                std::cerr << "    FAILED: Output controls cannot be reached by scrolling" << std::endl;
+                return false;
+            }
+        }
+
+        for (bool midi : { false, true })
+            for (bool sample : { false, true })
+                for (bool stereo : { false, true })
+                {
+                    auto layout = gin::SidebarLayout::create (186, midi, sample, stereo);
+                    if (layout.midi.isEmpty() == midi || layout.sample.isEmpty() == sample || layout.xy.isEmpty() == stereo
+                        || layout.spectrum.isEmpty() || layout.scope.isEmpty() || layout.output.getBottom() > layout.height)
+                        return false;
+                }
+
+        std::cout << "    Sidebar layout: PASSED" << std::endl;
+        return true;
+    }
+
+    bool testVoicingPresets()
+    {
+        std::cout << "  Testing warm voicing persistence, reset and block independence..." << std::endl;
+        const auto presetDir = juce::File (__FILE__).getParentDirectory().getParentDirectory().getChildFile ("presets");
+        const char* names[] = { "Warm Body", "Warm Body + Detail" };
+        for (int mode = 1; mode <= 2; ++mode)
+        {
+            auto proc = createProcessor (64);
+            gin::Program program;
+            program.loadFromFile (presetDir.getChildFile (juce::String (names[mode - 1]) + ".xml"), true);
+            program.loadProcessor (*proc);
+            proc->stateUpdated();
+            if (proc->getVoicing() != mode) return false;
+
+            juce::MemoryBlock saved;
+            proc->getStateInformation (saved);
+            auto restored = createProcessor (64);
+            restored->setStateInformation (saved.getData(), int (saved.getSize()));
+            if (restored->getVoicing() != mode) return false;
+
+            const std::vector<Event> events {
+                { 0, juce::MidiMessage::noteOn (1, 48, (juce::uint8) 90) },
+                { 3000, juce::MidiMessage::controllerEvent (1, 64, 127) },
+                { 6000, juce::MidiMessage::noteOff (1, 48) },
+                { 9000, juce::MidiMessage::noteOn (1, 55, (juce::uint8) 80) },
+                { 14000, juce::MidiMessage::controllerEvent (1, 64, 0) }
+            };
+            auto a = renderProcessor (*proc, events, { 64 }, 24000);
+            auto b = renderProcessor (*restored, events, { 7, 101, 512, 3 }, 24000);
+            if (a != b || ! (rms (a, 0.0f, 0.4f) > 1e-5f)) return false;
+
+            juce::AudioBuffer<float> audio (2, 64);
+            juce::MidiBuffer midi;
+            midi.ensureSize (1024);
+            midi.addEvent (juce::MidiMessage::allSoundOff (1), 0);
+            g_allocationCount = 0;
+            t_countAllocations = true;
+            proc->processBlock (audio, midi);
+            proc->reset();
+            midi.clear();
+            bool silent = true;
+            for (int i = 0; i < 1100; ++i)
+            {
+                proc->processBlock (audio, midi);
+                silent &= audio.getMagnitude (0, 64) == 0.0f;
+            }
+            t_countAllocations = false;
+            if (! silent || g_allocationCount.load() != 0) return false;
+
+            // Missing voicing in an older session must restore Classic.
+            const juce::String legacy = "<state><state/></state>";
+            proc->setStateInformation (legacy.toRawUTF8(), legacy.getNumBytesAsUTF8());
+            if (proc->getVoicing() != PianoVoicing::classic) return false;
+            proc->processBlock (audio, midi);
+            if (proc->piano->getVoicing() != PianoVoicing::classic) return false;
+
+            // The resampled body, EQ, and per-note envelope must stay finite.
+            for (double rate : { 44100.0, 48000.0, 96000.0 })
+            {
+                restored->setVoicing (mode);
+                restored->setRateAndBufferSizeDetails (rate, 64);
+                restored->prepareToPlay (rate, 64);
+                midi.clear();
+                midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 90), 0);
+                g_allocationCount = 0;
+                t_countAllocations = true;
+                bool finite = true;
+                for (int i = 0; i < 400; ++i)
+                {
+                    restored->processBlock (audio, midi);
+                    midi.clear();
+                    for (int j = 0; j < 64; ++j) finite &= std::isfinite (audio.getSample (0, j));
+                }
+                t_countAllocations = false;
+                if (! finite || g_allocationCount.load() != 0) return false;
+            }
+        }
+        std::cout << "    Warm voicing presets: PASSED" << std::endl;
+        return true;
+    }
+
     struct Event
     {
         int sample;
@@ -3019,6 +3276,7 @@ private:
             { "Dwgs4", pDwgs4 },
             { "Downsample", pDownsample },
             { "LongModes", pLongModes },
+            { "StereoWidth", pStereoWidth },
         };
 
         constexpr int blockSize = 64;
@@ -3860,7 +4118,7 @@ BenchmarkResult runSingleBenchmark(const std::string& name, int numVoices)
 
     // Set default parameters
     for (int i = 0; i < NumParams; i++)
-        piano.setParameter(i, 0.5f);
+        piano.setParameter(i, i == pStereoWidth ? 0.0f : 0.5f);
     piano.setParameter(pVolume, 0.7f);
 
     int totalSamples = static_cast<int>(BENCHMARK_DURATION_SECONDS * BENCHMARK_SAMPLE_RATE);

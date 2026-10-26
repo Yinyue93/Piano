@@ -21,6 +21,7 @@ target_sources(PianoTests PRIVATE
     ${CMAKE_SOURCE_DIR}/plugin/Source/utils.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Source/AudioFFT.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Source/FFTConvolver.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/Source/TwoStageFFTConvolver.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Source/Utilities.cpp
     # The host-facing code, so the processor tests run the plugin's own
     # processBlock() and sustain pedal handling

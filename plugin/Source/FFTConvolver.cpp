@@ -72,6 +72,19 @@ void FFTConvolver::reset()
 }
 
 
+void FFTConvolver::clearHistory()
+{
+    if (_blockSize == 0) return;
+    for (auto& segment : _segments) segment->setZero();
+    _fftBuffer.setZero();
+    _preMultiplied.setZero();
+    _conv.setZero();
+    _overlap.setZero();
+    _inputBuffer.setZero();
+    _current = 0;
+    _inputBufferFill = 0;
+}
+
 bool FFTConvolver::init(size_t blockSize, const Sample* ir, size_t irLen)
 {
     reset();

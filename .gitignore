@@ -49,3 +49,6 @@ build-xcode
 
 # Local code review report
 /CODEBASE_REVIEW.md
+
+# Local listening comparison renders
+/audio-comparisons/

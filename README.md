@@ -15,6 +15,7 @@ stability, real-time safety and usability fixes. See [CHANGELOG.md](CHANGELOG.md
 - Hammer-string interaction simulation
 - Longitudinal string modes
 - Soundboard resonance
+- Adjustable stereo width with keyboard placement and subtle early reflections
 - Sustain pedal support
 - Available as VST, VST3, CLAP, AU (macOS) and LV2 (Linux) plugins, plus a standalone app
 
@@ -82,6 +83,44 @@ honored. The *Time* readout in the editor follows the file's position.
 
 On Windows, choose **Windows Audio (Low Latency Mode)** as the audio device type for the
 lowest latency with ordinary sound cards. If you have an ASIO driver, use that instead.
+
+## Warm piano presets
+
+The `presets/` folder contains two voicings selected from the listening comparisons:
+
+- **Warm Body**: the alternative convolution soundboard (comparison 1).
+- **Warm Body + Detail**: that body with additional upper-harmonic detail and a
+  faster initial decay for each note (comparison 4).
+
+In the updated app, select either name from the preset menu. On Windows, user
+presets are XML files in `%APPDATA%\com.socalabs\Piano\programs`; copy the two
+files there when installing this build on another computer. These presets need
+the updated build: older versions cannot reproduce their voicing.
+
+Existing presets and sessions use the original model unless they explicitly
+select a warm voicing. Switching voicings stops the previous notes. The three
+Soundboard controls affect the original model; warm voicings use a fixed body
+response. Other piano parameters remain editable, and saved presets retain the
+selected voicing. Their Volume setting matches the approved audition level;
+adjust it as needed for other music.
+
+The response is the project's existing embedded IR, with undocumented recording
+provenance. The audition used it at 48 kHz; other rates resample it from that
+reference. The Detail mode uses fixed EQ and a per-note decay envelope, with no
+sampled-piano library or automatic loudness processing.
+
+## Stereo width
+
+The **Stereo Width** fader blends from the original mono sound at **0%** to a
+wider player-perspective image at **100%**: bass toward the left, treble toward
+the right, with quiet early reflections adding space around individual notes.
+Try **60%** as a starting point for a grand-piano recording feel.
+
+Width works with Classic, Warm Body and Warm Body + Detail. Changes are smoothed
+over 30 ms, and the setting is saved in presets and sessions. Existing presets
+and sessions default to 0%. Averaging the two channels preserves the original
+mono signal; stereo peaks can be higher, so leave some output headroom. This is
+a modeled stereo image, not a sampled microphone recording or a room reverb.
 
 ## Testing
 

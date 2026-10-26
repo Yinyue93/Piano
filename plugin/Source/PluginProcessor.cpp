@@ -133,6 +133,9 @@ static float userValue (int32_t index, float value)
         case pLongModes:
             v = 2 - lrintf(value);
             break;
+        case pStereoWidth:
+            v = 100.0f * value;
+            break;
     }
     return v;
 }
@@ -145,7 +148,7 @@ static juce::String formatUserValue (int32_t index, float v)
     if (index == pLongModes)
         return v < 1.5f ? "Full" : "Normal";
 
-    if (index == pDwgs4 || index == pDownsample)
+    if (index == pDwgs4 || index == pDownsample || index == pStereoWidth)
         return juce::String (juce::roundToInt (v));
 
     auto a = std::abs (v);
@@ -281,6 +284,9 @@ static float userValueInverse (int32_t index, float v)
         case pLongModes:
             value = 2.0f - v;
             break;
+        case pStereoWidth:
+            value = v / 100.0f;
+            break;
     }
     return juce::jlimit (0.0f, 1.0f, value);
 }
@@ -355,6 +361,8 @@ PianoAudioProcessor::PianoAudioProcessor()
     params.add (addExtParam ("Dwgs4", "Dwgs4", "", "" , { 0.0f, 1.0f }, 1.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("Downsample", "Downsample", "", "" , { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
     params.add (addExtParam ("LongModes", "Long Modes", "", "", { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
+    // Append to preserve all existing host parameter indices. Old state defaults to mono.
+    params.add (addExtParam ("StereoWidth", "Stereo Width", "", "%", { 0.0f, 1.0f }, 0.0f, {0.0f}, conversionFunction));
 
     jassert (params.size() == NumParams);
     jassert (params[pHammerPosition] == hammerPosition);
@@ -370,6 +378,14 @@ PianoAudioProcessor::~PianoAudioProcessor()
 //==============================================================================
 void PianoAudioProcessor::stateUpdated()
 {
+    requestedVoicing.store (juce::jlimit (0, 2, int (state.getProperty ("pianoVoicing", 0))),
+                           std::memory_order_relaxed);
+}
+
+void PianoAudioProcessor::setVoicing (int mode)
+{
+    state.setProperty ("pianoVoicing", juce::jlimit (0, 2, mode), nullptr);
+    stateUpdated();
 }
 
 void PianoAudioProcessor::updateState()
@@ -401,6 +417,7 @@ void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPer
 
     piano = std::make_unique<Piano>();
     piano->init (float (newSampleRate), interalBlockSize);
+    piano->setVoicing (getVoicing());
 
     int idx = 0;
     for (auto p : params)
@@ -449,6 +466,12 @@ void PianoAudioProcessor::updatePlayhead()
 void PianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+
+    if (piano->getVoicing() != getVoicing())
+    {
+        reset();
+        piano->setVoicing (getVoicing());
+    }
 
     auto numSamples = buffer.getNumSamples();
     auto lastSample = std::max (0, numSamples - 1);

@@ -76,6 +76,9 @@ public:
      * @brief Resets the convolver and discards the set impulse response
      */
     void reset();
+
+    // Synchronous use: keep the IR and storage, clearing audio history.
+    void clearHistory();
     
 protected:
     /**

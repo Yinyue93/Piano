@@ -17,6 +17,10 @@ public:
     void stateUpdated() override;
     void updateState() override;
 
+    // Preset-specific voicing; old state without this property uses Classic.
+    void setVoicing (int mode);
+    int getVoicing() const { return requestedVoicing.load (std::memory_order_relaxed); }
+
     //==============================================================================
     void reset() override;
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
@@ -67,6 +71,7 @@ public:
 
 private:
     void updatePlayhead();
+    std::atomic<int> requestedVoicing { PianoVoicing::classic };
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PianoAudioProcessor)
