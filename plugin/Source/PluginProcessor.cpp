@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "BoundedMidi.h"
 
 #include <mutex>
 
@@ -381,10 +382,17 @@ void PianoAudioProcessor::reset()
     Processor::reset();
 
     sustainPedal.reset();
+
+    // Drop what's queued and start again from the reported latency, so
+    // nothing from before the reset plays after it
     pendingMidi.clear();
+    pendingSamples = 0;
+
+    fifoOut.clear();
+    fifoOut.writeSilence (interalBlockSize);
 
     if (piano)
-        piano->allNotesOff();
+        piano->reset();
 }
 
 void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPerBlock)
@@ -402,13 +410,13 @@ void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPer
 
 	sustainPedal.reset();
 
+	inputMidi.ensureSize (midiBufferBytes);
+	sustainedMidi.ensureSize (midiBufferBytes);
 	pendingMidi.ensureSize (midiBufferBytes);
-	pendingMidiSpare.ensureSize (midiBufferBytes);
-	workMidi.ensureSize (midiBufferBytes);
 	pendingMidi.clear();
 	pendingSamples = 0;
 
-	fifoOut.setSize (2, newSamplesPerBlock * 2 + interalBlockSize);
+	fifoOut.setSize (2, 2 * interalBlockSize);
 
 	fifoOut.clear();
 	fifoOut.writeSilence (interalBlockSize);
@@ -422,45 +430,78 @@ void PianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 {
     juce::ScopedNoDenormals noDenormals;
 
-    if (midiLearn)
-        midiLearn->processBlock (midi, buffer.getNumSamples());
-
-	buffer.clear ();
     auto numSamples = buffer.getNumSamples();
+    auto lastSample = std::max (0, numSamples - 1);
 
-	keyState.processNextMidiBuffer (midi, 0, numSamples, true);
-	sustainPedal.processMidi (midi);
+	// Copy the host's MIDI to a buffer with storage of its own. Long messages
+	// (SysEx) are left out: the engine ignores them, and reading them as
+	// MidiMessages allocates. Timestamps outside the block are moved into it,
+	// so a note off can't get lost.
+	inputMidi.clear();
+	for (const auto meta : midi)
+		if (meta.numBytes <= 3)
+			BoundedMidi::add (inputMidi, midiBufferBytes, meta.data, meta.numBytes, juce::jlimit (0, lastSample, meta.samplePosition));
+
+	// The plugin doesn't make MIDI
+	midi.clear();
+
+    if (midiLearn)
+        midiLearn->processBlock (inputMidi, numSamples);
+
+	keyState.processNextMidiBuffer (inputMidi, 0, numSamples, true);
+	sustainPedal.processMidi (inputMidi, sustainedMidi, midiBufferBytes);
 
     int idx = 0;
     for (auto p : params)
         piano->setParameter (idx++, p->getValue());
 
-	// Queue this block's MIDI after whatever is still waiting from the last one
-	pendingMidi.addEvents (midi, 0, numSamples, pendingSamples);
-	pendingSamples += numSamples;
+	buffer.clear();
 
-	while (pendingSamples >= interalBlockSize)
+	// Go through the host block up to each engine block boundary: queue that
+	// stretch's MIDI, render the engine block once it's complete, then read
+	// the stretch out of the FIFO. The FIFO never holds more than two engine
+	// blocks, whatever the host's block size.
+	auto event = sustainedMidi.cbegin();
+	int pos = 0;
+
+	do
 	{
-		workMidi.clear();
-		workMidi.addEvents (pendingMidi, 0, interalBlockSize, 0);
+		int n = std::min (interalBlockSize - pendingSamples, numSamples - pos);
 
-		// Move the rest of the queue up to the start of the next block
-		pendingMidiSpare.clear();
-		pendingMidiSpare.addEvents (pendingMidi, interalBlockSize, pendingSamples - interalBlockSize, -interalBlockSize);
-		pendingMidi.swapWith (pendingMidiSpare);
-		pendingSamples -= interalBlockSize;
+		// An empty host block can still bring MIDI: it goes in at the
+		// current position
+		for (; event != sustainedMidi.cend() && ((*event).samplePosition < pos + n || numSamples == 0); ++event)
+		{
+			auto meta = *event;
+			BoundedMidi::add (pendingMidi, midiBufferBytes, meta.data, meta.numBytes, pendingSamples + meta.samplePosition - pos);
+		}
 
-		workBuffer.clear();
-		auto ptr = (float**)workBuffer.getArrayOfWritePointers();
-		piano->process (ptr, workBuffer.getNumSamples(), workMidi);
+		pendingSamples += n;
 
-		// No MIDI goes through the output FIFO, which keeps its read() allocation free
-		fifoOut.write (workBuffer, {});
+		if (pendingSamples == interalBlockSize)
+		{
+			workBuffer.clear();
+			auto ptr = (float**)workBuffer.getArrayOfWritePointers();
+			piano->process (ptr, interalBlockSize, pendingMidi);
+
+			pendingMidi.clear();
+			pendingSamples = 0;
+
+			// No MIDI goes through the output FIFO, which keeps its read() allocation free
+			fifoOut.write (workBuffer, {});
+		}
+
+		if (n > 0)
+		{
+			// Refers to the host buffer (no allocation for up to 32 channels)
+			juce::AudioBuffer<float> out (buffer.getArrayOfWritePointers(), buffer.getNumChannels(), pos, n);
+			juce::MidiBuffer noMidi;
+			fifoOut.read (out, noMidi);
+		}
+
+		pos += n;
 	}
-
-	// write the output
-	midi.clear();
-	fifoOut.read (buffer, midi);
+	while (pos < numSamples);
 }
 
 //==============================================================================

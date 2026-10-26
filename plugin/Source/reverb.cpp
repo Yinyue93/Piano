@@ -44,6 +44,18 @@ void Reverb::set (float size, float c1, float c3)
     scale = -2.0f / ReverbTaps;
 }
 
+void Reverb::clear()
+{
+    for (int k = 0; k < ReverbTaps; k++)
+    {
+        d[k].clear();
+        decay[k].clear();
+        o[k] = 0;
+        o4[k] = simde_mm_setzero_ps();
+    }
+    out = 0;
+}
+
 float Reverb::probe()
 {
     return out;

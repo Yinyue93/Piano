@@ -19,6 +19,8 @@ public:
     float filter(float in);
     float phasedelay(float omega);
     void init(int upsample = 1);
+    // Zeroes the input and output history, keeping the coefficients
+    void clear();
 
     float *x;
     float *y;
@@ -197,6 +199,7 @@ public:
     void create(float omega, float gamma);
     float go(float in);
     vec4 go4(vec4 vin);
+    void clear() { x1 = 0; x2 = 0; }
 
     // variables
     float g;
@@ -231,6 +234,8 @@ public:
     int getDelay();
     void create(int resample);
     vec8 filter8(vec8 in);
+    // Zeroes the input history, keeping the coefficients
+    void clear() { memset (x, 0, sizeof (x)); }
     alignas(32) float b[ResampleFilterSize];
     alignas(32) float x[ResampleFilterSize*4+16];
     float *xc;

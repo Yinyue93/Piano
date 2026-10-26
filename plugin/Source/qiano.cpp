@@ -459,6 +459,12 @@ bool PianoNote::triggerOn (float velocity, float* tune)
 {
     //logf("note = %d velocity =  %g\n",note,velocity);
     Value *v = piano->vals;
+
+    if (needsClear)
+    {
+        clearState();
+        needsClear = false;
+    }
     float f0 = 27.5; //A0 note 21
     float L = 0.14f + 1.4f / (1 + exp (-3.4f + 1.4f * log (f / f0)));
     L = 0.04f + 2.0f / (1.0f + exp (-3.2f + 1.4f * log (f / f0)));
@@ -691,6 +697,38 @@ void PianoNote::deActivate()
     bActive = false;
 }
 
+void PianoNote::cut()
+{
+    bActive = false;
+    needsClear = true;
+}
+
+void PianoNote::clearState()
+{
+    for (int k = 0; k < nstrings; k++)
+    {
+        stringT[k]->clear();
+        stringHT[k]->clear();
+    }
+
+    longHP.clear();
+    upSampleFilter.clear();
+    downSampleFilter.clear();
+
+    std::fill (std::begin (tranForces), std::end (tranForces), 0.0f);
+    std::fill (std::begin (tranForcesH), std::end (tranForcesH), 0.0f);
+    std::fill (std::begin (longTranForces), std::end (longTranForces), 0.0f);
+    std::fill (std::begin (longForces), std::end (longForces), 0.0f);
+    std::fill (std::begin (longForcesK), std::end (longForcesK), 0.0f);
+    std::fill (std::begin (outUp), std::end (outUp), 0.0f);
+    std::fill (std::begin (outDown), std::end (outDown), 0.0f);
+
+    dcX1 = 0.0f;
+    dcY1 = 0.0f;
+    energy = 0.0;
+    maxEnergy = 0.0;
+}
+
 bool PianoNote::isActive()
 {
     return bActive;
@@ -780,7 +818,13 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
         nextDelta = std::min (nextDelta, sampleFrames);
         process (outS, nextDelta - delta, delta);
 
-        if (allOff)
+        // All Sound Off stops everything at once, All Notes Off releases the
+        // keys (the notes are damped as usual)
+        if (m.isAllSoundOff())
+        {
+            reset();
+        }
+        else if (allOff)
         {
             allNotesOff();
         }
@@ -805,9 +849,7 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
     process (outS, sampleFrames - delta, delta);
 }
 
-// Drops the dampers on every sounding note. Used for All Notes Off and All
-// Sound Off: cutting voices dead would leave energy in the strings that comes
-// back on the next strike, so they're damped instead (which is quick).
+// Drops the dampers on every sounding note, for All Notes Off
 void Piano::allNotesOff()
 {
     PianoNote* v = voiceList;
@@ -818,6 +860,21 @@ void Piano::allNotesOff()
             v->triggerOff();
 
     } while (v && (v=v->next) && (v != voiceList));
+}
+
+void Piano::reset()
+{
+    while (voiceList)
+    {
+        auto v = voiceList;
+        v->cut();
+        removeVoice (v);
+    }
+
+#ifdef FDN_REVERB
+    if (soundboard)
+        soundboard->clear();
+#endif
 }
 
 void Piano::triggerOn (int note, float velocity, float* tune)

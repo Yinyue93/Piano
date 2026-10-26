@@ -39,15 +39,20 @@ public:
 
 	constexpr static int interalBlockSize = 32;
 
-	// The engine renders fixed blocks of interalBlockSize. Incoming MIDI waits in
-	// pendingMidi (timestamps relative to the first unrendered sample) until a
-	// whole block is available. These buffers are preallocated in prepareToPlay
-	// so they don't allocate on the audio thread.
-	constexpr static int midiBufferBytes = 8192;
-	juce::MidiBuffer		pendingMidi, pendingMidiSpare, workMidi;
+	// The host's MIDI is copied to inputMidi and goes through the sustain pedal
+	// into sustainedMidi. The engine renders fixed blocks of interalBlockSize:
+	// MIDI waits in pendingMidi (timestamps relative to the engine block) until
+	// the block is complete. These buffers get their storage in prepareToPlay
+	// and stay within it (see BoundedMidi), so they don't allocate on the audio
+	// thread.
+	constexpr static int midiBufferBytes = 32768;
+	juce::MidiBuffer		inputMidi, sustainedMidi, pendingMidi;
 	int						pendingSamples = 0;
 
-	gin::AudioMidiFifo		fifoOut {2, interalBlockSize};
+	// Holds the latency (one engine block) plus the block being read out. The
+	// host block is rendered a step at a time, so this doesn't depend on the
+	// host's block size.
+	gin::AudioMidiFifo		fifoOut {2, 2 * interalBlockSize};
 	juce::AudioSampleBuffer workBuffer {2, interalBlockSize};
 
     //==============================================================================

@@ -20,6 +20,9 @@ public:
     // Returns false if the string can't be built at this rate (the note shouldn't play)
     bool set(float Fs, int longmodes, int downsample, int upsample, float f, float c1, float c3, float B, float L, float longFreq1, float gammaL, float gammaL2, float inpos, float Z);
     void damper(float c1, float c3, float gammaL, float gammaL2, int nDamper);
+    // Silences the string: zeroes the delay lines, filter histories and
+    // longitudinal modes, keeping the tuning. Doesn't allocate.
+    void clear();
     
     float input_velocity();
     float next_input_velocity();

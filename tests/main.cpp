@@ -18,10 +18,73 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include <atomic>
+#include <new>
 
 // Current test tracking for crash reporting
 static const char* g_currentTestName = "initialization";
 static const char* g_currentTestPhase = "setup";
+
+//==============================================================================
+// Allocation counting. The processor tests count what processBlock() takes from
+// the heap through operator new, on the calling thread only. JUCE's containers
+// use malloc, which this doesn't see, so the tests also check that the MIDI
+// buffers' storage doesn't change.
+static thread_local bool t_countAllocations = false;
+static std::atomic<int> g_allocationCount { 0 };
+
+static void* countedAlloc (std::size_t size)
+{
+    if (t_countAllocations)
+        g_allocationCount++;
+
+    if (auto p = std::malloc (size > 0 ? size : 1))
+        return p;
+
+    throw std::bad_alloc();
+}
+
+static void* countedAlignedAlloc (std::size_t size, std::align_val_t alignment)
+{
+    if (t_countAllocations)
+        g_allocationCount++;
+
+    auto align = std::max (std::size_t (alignment), sizeof (void*));
+    size = std::max (size, std::size_t (1));
+
+   #ifdef _WIN32
+    if (auto p = _aligned_malloc (size, align))
+        return p;
+   #else
+    void* p = nullptr;
+    if (posix_memalign (&p, align, size) == 0)
+        return p;
+   #endif
+
+    throw std::bad_alloc();
+}
+
+static void alignedFree (void* p) noexcept
+{
+   #ifdef _WIN32
+    _aligned_free (p);
+   #else
+    std::free (p);
+   #endif
+}
+
+void* operator new (std::size_t size)                                   { return countedAlloc (size); }
+void* operator new[] (std::size_t size)                                 { return countedAlloc (size); }
+void* operator new (std::size_t size, std::align_val_t a)               { return countedAlignedAlloc (size, a); }
+void* operator new[] (std::size_t size, std::align_val_t a)             { return countedAlignedAlloc (size, a); }
+void operator delete (void* p) noexcept                                 { std::free (p); }
+void operator delete[] (void* p) noexcept                               { std::free (p); }
+void operator delete (void* p, std::size_t) noexcept                    { std::free (p); }
+void operator delete[] (void* p, std::size_t) noexcept                  { std::free (p); }
+void operator delete (void* p, std::align_val_t) noexcept               { alignedFree (p); }
+void operator delete[] (void* p, std::align_val_t) noexcept             { alignedFree (p); }
+void operator delete (void* p, std::size_t, std::align_val_t) noexcept  { alignedFree (p); }
+void operator delete[] (void* p, std::size_t, std::align_val_t) noexcept { alignedFree (p); }
 
 void signalHandler(int signal)
 {
@@ -1964,6 +2027,8 @@ public:
 
         allPassed &= testAllOffDampsNotes ("All Notes Off", juce::MidiMessage::allNotesOff (1));
         allPassed &= testAllOffDampsNotes ("All Sound Off", juce::MidiMessage::allSoundOff (1));
+        allPassed &= testAllSoundOffSilences();
+        allPassed &= testStrikeAfterReset();
 
         if (allPassed)
             std::cout << "All MIDI tests PASSED" << std::endl;
@@ -1994,6 +2059,124 @@ private:
         }
 
         std::cout << "    " << name << ": PASSED" << std::endl;
+        return true;
+    }
+
+    // All Sound Off stops the sound at once: no damping, and the soundboard
+    // is silenced too
+    bool testAllSoundOffSilences()
+    {
+        std::cout << "  Testing All Sound Off silences at once..." << std::endl;
+
+        const int offSample = int (0.25f * SAMPLE_RATE) + 7;
+
+        for (float dwgs4 : { 0.0f, 1.0f })
+        {
+            Piano piano;
+            piano.init (SAMPLE_RATE, BLOCK_SIZE);
+
+            for (int i = 0; i < NumParams; i++)
+                piano.setParameter (i, 0.5f);
+
+            piano.setParameter (pDwgs4, dwgs4);
+
+            std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE), out;
+            float* channels[2] = { left.data(), right.data() };
+
+            for (int pos = 0; pos < int (0.5f * SAMPLE_RATE); pos += BLOCK_SIZE)
+            {
+                juce::MidiBuffer midi;
+
+                if (pos == 0)
+                    for (int note : { 36, 48, 60, 64, 67 })
+                        midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+
+                if (offSample >= pos && offSample < pos + BLOCK_SIZE)
+                    midi.addEvent (juce::MidiMessage::allSoundOff (1), offSample - pos);
+
+                piano.process (channels, BLOCK_SIZE, midi);
+                out.insert (out.end(), left.begin(), left.end());
+            }
+
+            double before = 0.0;
+            for (int i = 0; i < offSample; i++)
+                before += double (out[size_t (i)]) * out[size_t (i)];
+
+            int nonZero = 0;
+            for (size_t i = size_t (offSample); i < out.size(); i++)
+                if (out[i] != 0.0f)
+                    nonZero++;
+
+            std::cout << "    Dwgs4 " << dwgs4 << ": " << nonZero << " non-zero samples after All Sound Off" << std::endl;
+
+            if (! (before > 0.0) || nonZero != 0)
+            {
+                std::cerr << "    FAILED: All Sound Off didn't silence the output" << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "    All Sound Off silences at once: PASSED" << std::endl;
+        return true;
+    }
+
+    // A note cut by All Sound Off still had its strings ringing. Struck
+    // again, it must sound like a fresh strike, without the old sound.
+    bool testStrikeAfterReset()
+    {
+        std::cout << "  Testing a strike after All Sound Off..." << std::endl;
+
+        auto render = [] (bool ringFirst)
+        {
+            Piano piano;
+            piano.init (SAMPLE_RATE, BLOCK_SIZE);
+
+            for (int i = 0; i < NumParams; i++)
+                piano.setParameter (i, 0.5f);
+
+            std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE), out;
+            float* channels[2] = { left.data(), right.data() };
+
+            const int numBlocks = int (1.5f * SAMPLE_RATE) / BLOCK_SIZE;
+            const int offBlock  = int (0.3f * SAMPLE_RATE) / BLOCK_SIZE;
+            const int onBlock   = int (0.5f * SAMPLE_RATE) / BLOCK_SIZE;
+
+            for (int b = 0; b < numBlocks; b++)
+            {
+                juce::MidiBuffer midi;
+
+                if (b == 0 && ringFirst)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127), 0);
+                if (b == offBlock && ringFirst)
+                    midi.addEvent (juce::MidiMessage::allSoundOff (1), 0);
+                if (b == onBlock)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 60), 0);
+
+                piano.process (channels, BLOCK_SIZE, midi);
+                out.insert (out.end(), left.begin(), left.end());
+            }
+
+            double sum = 0.0;
+            for (size_t i = size_t (0.5f * SAMPLE_RATE); i < out.size(); i++)
+                sum += double (out[i]) * out[i];
+
+            return std::sqrt (sum / double (out.size() - size_t (0.5f * SAMPLE_RATE)));
+        };
+
+        double fresh = render (false);
+        double again = render (true);
+        double diff  = std::abs (again - fresh) / std::max (fresh, 1e-20);
+
+        std::cout << "    RMS fresh: " << fresh << ", after All Sound Off: " << again
+                  << " (difference " << diff * 100.0 << "%)" << std::endl;
+
+        if (! (fresh > 0.0 && diff < 0.05))
+        {
+            std::cerr << "    FAILED: the old sound came back on the next strike" << std::endl;
+            return false;
+        }
+
+        std::cout << "    Strike after All Sound Off: PASSED" << std::endl;
         return true;
     }
 
@@ -2270,6 +2453,11 @@ public:
         allPassed &= testParameterMapping();
         allPassed &= testLatencyAndBlockSizes();
         allPassed &= testSustainPedal();
+        allPassed &= testAllSoundOff();
+        allPassed &= testReset();
+        allPassed &= testBoundedMidi();
+        allPassed &= testMidiFlood();
+        allPassed &= testNoAllocations();
 
         if (allPassed)
             std::cout << "All processor tests PASSED" << std::endl;
@@ -2286,6 +2474,8 @@ private:
         juce::MidiMessage message;
     };
 
+    // maxBlockSize is what prepareToPlay() is told. Hosts can still send
+    // bigger blocks, and the tests do.
     static std::unique_ptr<PianoAudioProcessor> createProcessor (int maxBlockSize)
     {
         PianoAudioProcessor::launchCrashReporter = false;
@@ -2296,12 +2486,16 @@ private:
         return proc;
     }
 
-    // Renders the left channel through processBlock(), cycling through blockSizes
-    static std::vector<float> renderProcessor (PianoAudioProcessor& proc, const std::vector<Event>& events,
+    // Renders the left channel through processBlock(), cycling through
+    // blockSizes. An empty block gets the events at its position.
+    static std::vector<float> renderProcessor (PianoAudioProcessor& proc, std::vector<Event> events,
                                                const std::vector<int>& blockSizes, int numSamples)
     {
         std::vector<float> out;
         out.reserve (size_t (numSamples));
+
+        std::stable_sort (events.begin(), events.end(), [] (const Event& a, const Event& b) { return a.sample < b.sample; });
+        size_t nextEvent = 0;
 
         juce::AudioBuffer<float> buffer;
         juce::MidiBuffer midi;
@@ -2313,9 +2507,8 @@ private:
             buffer.setSize (2, n, false, false, true);
 
             midi.clear();
-            for (auto& e : events)
-                if (e.sample >= pos && e.sample < pos + n)
-                    midi.addEvent (e.message, e.sample - pos);
+            for (; nextEvent < events.size() && (events[nextEvent].sample < pos + n || (n == 0 && events[nextEvent].sample == pos)); nextEvent++)
+                midi.addEvent (events[nextEvent].message, events[nextEvent].sample - pos);
 
             proc.processBlock (buffer, midi);
 
@@ -2448,6 +2641,7 @@ private:
         constexpr int numSamples = latency * 700;
 
         const std::vector<Event> events = {
+            { 0,     juce::MidiMessage::noteOn (1, 48, (juce::uint8) 70) },
             { 5,     juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100) },
             { 1000,  juce::MidiMessage::noteOn (1, 64, (juce::uint8) 80) },
             { 5003,  juce::MidiMessage::noteOn (1, 67, (juce::uint8) 110) },
@@ -2490,17 +2684,28 @@ private:
             return false;
         }
 
-        const std::vector<std::vector<int>> partitions = {
-            { 32 }, { 512 }, { 1 }, { 7 }, { 100, 3, 64, 17 },
+        struct Partition
+        {
+            std::vector<int> blockSizes;
+            int prepared;   // the block size prepareToPlay() is told
         };
 
-        for (auto& blockSizes : partitions)
+        // The last three send blocks bigger than prepared, which used to
+        // overflow the output FIFO, and empty blocks that carry MIDI
+        const std::vector<Partition> partitions = {
+            { { 32 }, 32 }, { { 512 }, 512 }, { { 1 }, 1 }, { { 7 }, 7 }, { { 100, 3, 64, 17 }, 100 },
+            { { 4096 }, 64 }, { { 1000, 5000, 3 }, 64 }, { { 0, 7, 0, 100 }, 100 },
+        };
+
+        for (auto& [blockSizes, prepared] : partitions)
         {
             juce::String name;
             for (auto n : blockSizes)
                 name << (name.isEmpty() ? "" : ", ") << n;
 
-            auto proc = createProcessor (*std::max_element (blockSizes.begin(), blockSizes.end()));
+            name << " (prepared for " << prepared << ")";
+
+            auto proc = createProcessor (prepared);
 
             if (proc->getLatencySamples() != latency)
             {
@@ -2533,6 +2738,350 @@ private:
 
         std::cout << "    Latency and host block sizes: PASSED" << std::endl;
         return true;
+    }
+
+    // All Sound Off stops everything at once: the output is silent from the
+    // event on, plus the reported latency
+    bool testAllSoundOff()
+    {
+        std::cout << "  Testing All Sound Off through the processor..." << std::endl;
+
+        constexpr int latency = PianoAudioProcessor::interalBlockSize;
+        constexpr int offSample = 3000;
+
+        auto proc = createProcessor (BLOCK_SIZE);
+        auto out = renderProcessor (*proc, { { 0,   juce::MidiMessage::noteOn (1, 48, (juce::uint8) 100) },
+                                             { 0,   juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100) },
+                                             { 200, juce::MidiMessage::noteOn (1, 67, (juce::uint8) 100) },
+                                             { offSample, juce::MidiMessage::allSoundOff (1) } },
+                                    { BLOCK_SIZE }, int (0.5f * SAMPLE_RATE));
+
+        float before = 0.0f;
+        for (int i = 0; i < offSample + latency; i++)
+            before = std::max (before, std::abs (out[size_t (i)]));
+
+        int nonZero = 0;
+        for (size_t i = offSample + latency; i < out.size(); i++)
+            if (out[i] != 0.0f)
+                nonZero++;
+
+        std::cout << "    Peak before: " << before << ", non-zero samples after: " << nonZero << std::endl;
+
+        if (! (before > 0.0f) || nonZero != 0)
+        {
+            std::cerr << "    FAILED: All Sound Off didn't silence the output" << std::endl;
+            return false;
+        }
+
+        std::cout << "    All Sound Off through the processor: PASSED" << std::endl;
+        return true;
+    }
+
+    // reset() drops what's queued, silences the engine and starts again from
+    // the reported latency, wherever it was in the engine block. After it the
+    // processor must behave exactly like a new one.
+    bool testReset()
+    {
+        std::cout << "  Testing reset()..." << std::endl;
+
+        constexpr int engineBlock = PianoAudioProcessor::interalBlockSize;
+        constexpr int afterSamples = 4096;
+        const std::vector<Event> after = { { 10, juce::MidiMessage::noteOn (1, 72, (juce::uint8) 100) } };
+
+        std::vector<float> fresh;
+        {
+            auto proc = createProcessor (64);
+            fresh = renderProcessor (*proc, after, { 64 }, afterSamples);
+        }
+
+        for (int remainder = 0; remainder < engineBlock; remainder++)
+        {
+            auto proc = createProcessor (64);
+
+            // A chord, stopped this far into an engine block
+            renderProcessor (*proc, { { 0, juce::MidiMessage::noteOn (1, 48, (juce::uint8) 120) },
+                                      { 0, juce::MidiMessage::noteOn (1, 52, (juce::uint8) 120) },
+                                      { 0, juce::MidiMessage::noteOn (1, 55, (juce::uint8) 120) },
+                                      { 0, juce::MidiMessage::controllerEvent (1, 64, 127) } },
+                             { 1 }, engineBlock * 40 + remainder);
+
+            if (proc->pendingSamples != remainder)
+            {
+                std::cerr << "    FAILED: expected " << remainder << " samples pending, found "
+                          << proc->pendingSamples << std::endl;
+                return false;
+            }
+
+            proc->reset();
+
+            auto out = renderProcessor (*proc, after, { 64 }, afterSamples);
+
+            float maxDiff = 0.0f;
+            bool finite = true;
+
+            for (size_t i = 0; i < out.size(); i++)
+            {
+                finite = finite && std::isfinite (out[i]);
+                maxDiff = std::max (maxDiff, std::abs (out[i] - fresh[i]));
+            }
+
+            if (! finite || maxDiff != 0.0f)
+            {
+                std::cerr << "    FAILED: after a reset " << remainder << " samples into an engine block, "
+                          << "the output differs from a new processor's by up to " << maxDiff << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "    Same output as a new processor, at all " << engineBlock << " positions in the engine block" << std::endl;
+        std::cout << "    reset(): PASSED" << std::endl;
+        return true;
+    }
+
+    // The policy for full MIDI buffers: other events go first, note offs
+    // and All Off can use the rest, and when even that runs out one All Notes
+    // Off takes their place. The buffer's storage never grows.
+    bool testBoundedMidi()
+    {
+        std::cout << "  Testing full MIDI buffers..." << std::endl;
+
+        constexpr int capacity = 1024;
+        juce::MidiBuffer buffer;
+        buffer.ensureSize (capacity);
+        const auto storage = buffer.data.begin();
+
+        auto noteOn  = juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100);
+        auto noteOff = juce::MidiMessage::noteOff (1, 60);
+
+        int onsAdded = 0;
+        for (int i = 0; i < 1000; i++)
+            if (BoundedMidi::add (buffer, capacity, noteOn.getRawData(), noteOn.getRawDataSize(), i))
+                onsAdded++;
+
+        const auto onsBytes = buffer.data.size();
+
+        int offsAdded = 0;
+        for (int i = 0; i < 1000; i++)
+            if (BoundedMidi::add (buffer, capacity, noteOff.getRawData(), noteOff.getRawDataSize(), i))
+                offsAdded++;
+
+        int allNotesOff = 0;
+        for (const auto meta : buffer)
+            if (meta.getMessage().isAllNotesOff())
+                allNotesOff++;
+
+        std::cout << "    Capacity " << capacity << " bytes: " << onsAdded << " note ons, " << offsAdded
+                  << " note offs, " << allNotesOff << " All Notes Off" << std::endl;
+
+        if (onsAdded == 0 || onsAdded == 1000 || onsBytes > capacity * 3 / 4)
+        {
+            std::cerr << "    FAILED: note ons weren't limited to three quarters of the buffer" << std::endl;
+            return false;
+        }
+
+        if (offsAdded == 0 || offsAdded == 1000 || allNotesOff != 1)
+        {
+            std::cerr << "    FAILED: note offs didn't fill the rest, with one All Notes Off at the end" << std::endl;
+            return false;
+        }
+
+        if (buffer.data.begin() != storage || buffer.data.size() > capacity)
+        {
+            std::cerr << "    FAILED: the buffer's storage grew" << std::endl;
+            return false;
+        }
+
+        std::cout << "    Full MIDI buffers: PASSED" << std::endl;
+        return true;
+    }
+
+    // A flood of MIDI in one block fills the buffers. Whatever gets dropped,
+    // the notes must still stop when they're released.
+    bool testMidiFlood()
+    {
+        std::cout << "  Testing a flood of MIDI..." << std::endl;
+
+        auto tail = [this] (bool controllers, bool noteOffs, bool finalOffs)
+        {
+            std::vector<Event> events;
+
+            for (int note = PIANO_MIN_NOTE; note <= PIANO_MAX_NOTE; note += 3)
+                events.push_back ({ 0, juce::MidiMessage::noteOn (1, note, (juce::uint8) 100) });
+
+            // Controllers fill the buffers with events to drop. Note offs for
+            // a single key fill them with releases, down to the All Notes Off.
+            for (int i = 0; i < 8000; i++)
+            {
+                if (controllers)
+                    events.push_back ({ 1 + i % 400, juce::MidiMessage::controllerEvent (1, 1, i % 128) });
+                if (noteOffs)
+                    events.push_back ({ 1 + i % 400, juce::MidiMessage::noteOff (1, PIANO_MIN_NOTE) });
+            }
+
+            if (finalOffs)
+                for (int note = PIANO_MIN_NOTE; note <= PIANO_MAX_NOTE; note += 3)
+                    events.push_back ({ 450, juce::MidiMessage::noteOff (1, note) });
+
+            auto proc = createProcessor (BLOCK_SIZE);
+            auto out = renderProcessor (*proc, events, { BLOCK_SIZE }, int (1.5f * SAMPLE_RATE));
+            return rms (out, 1.0f, 1.5f);
+        };
+
+        float held        = tail (false, false, false);
+        float controllers = tail (true,  false, true);
+        float noteOffs    = tail (false, true,  true);
+
+        std::cout << "    Tail RMS: held " << held << ", released after 8000 controllers " << controllers
+                  << ", after 8000 note offs " << noteOffs << std::endl;
+
+        // Written so that NaN fails
+        if (! (held > 0.0f && controllers <= 0.1f * held && noteOffs <= 0.1f * held))
+        {
+            std::cerr << "    FAILED: notes kept ringing after a flood of MIDI" << std::endl;
+            return false;
+        }
+
+        std::cout << "    Flood of MIDI: PASSED" << std::endl;
+        return true;
+    }
+
+    // processBlock() must not allocate, from the first MIDI block on, through
+    // floods, the pedal, All Off, empty and oversized blocks, and reset().
+    // operator new is counted, and the MIDI buffers must stay in their storage
+    // (same memory, within their capacity).
+    bool testNoAllocations()
+    {
+        std::cout << "  Testing that the audio thread doesn't allocate..." << std::endl;
+
+        constexpr int prepared = 512;
+        auto proc = createProcessor (prepared);
+
+        auto storageOf = [&]
+        {
+            return std::array<const juce::uint8*, 3> { proc->inputMidi.data.begin(),
+                                                       proc->sustainedMidi.data.begin(),
+                                                       proc->pendingMidi.data.begin() };
+        };
+
+        const auto storage = storageOf();
+        int largest = 0;
+
+        juce::AudioBuffer<float> buffer (2, prepared * 8);
+        juce::MidiBuffer midi;
+        midi.ensureSize (1 << 18);
+
+        bool allPassed = true;
+
+        auto run = [&] (const char* what, int numSamples, const std::function<void (juce::MidiBuffer&)>& fill)
+        {
+            buffer.setSize (2, numSamples, false, false, true);
+            midi.clear();
+            fill (midi);
+
+            g_allocationCount = 0;
+            t_countAllocations = true;
+            proc->processBlock (buffer, midi);
+            t_countAllocations = false;
+
+            largest = std::max ({ largest, proc->inputMidi.data.size(), proc->sustainedMidi.data.size(),
+                                  proc->pendingMidi.data.size() });
+
+            if (g_allocationCount != 0)
+            {
+                std::cerr << "    FAILED: " << what << ": " << g_allocationCount.load() << " allocations" << std::endl;
+                allPassed = false;
+            }
+        };
+
+        auto forAllChannels = [] (juce::MidiBuffer& m, bool on, int pos)
+        {
+            for (int channel = 1; channel <= 16; channel++)
+                for (int note = PIANO_MIN_NOTE; note <= PIANO_MAX_NOTE; note++)
+                    m.addEvent (on ? juce::MidiMessage::noteOn (channel, note, (juce::uint8) 90)
+                                   : juce::MidiMessage::noteOff (channel, note), pos);
+        };
+
+        const juce::uint8 sysex[64] = {};
+
+        run ("first block, with a chord and a SysEx message", prepared, [&] (juce::MidiBuffer& m)
+        {
+            for (int note = 36; note <= 84; note += 4)
+                m.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), note);
+            m.addEvent (juce::MidiMessage::createSysExMessage (sysex, int (sizeof (sysex))), 100);
+        });
+
+        run ("pedal down, every note on all 16 channels", prepared, [&] (juce::MidiBuffer& m)
+        {
+            m.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
+            forAllChannels (m, true, 10);
+        });
+
+        run ("note offs held by the pedal", prepared, [&] (juce::MidiBuffer& m) { forAllChannels (m, false, 20); });
+
+        run ("pedal up, releasing them all", prepared, [&] (juce::MidiBuffer& m)
+        {
+            m.addEvent (juce::MidiMessage::controllerEvent (1, 64, 0), 5);
+        });
+
+        run ("8000 controllers and note offs", prepared, [&] (juce::MidiBuffer& m)
+        {
+            for (int i = 0; i < 8000; i++)
+            {
+                m.addEvent (juce::MidiMessage::controllerEvent (1, 1, i % 128), i % prepared);
+                m.addEvent (juce::MidiMessage::noteOff (1, 60), i % prepared);
+            }
+        });
+
+        run ("All Notes Off and All Sound Off", prepared, [&] (juce::MidiBuffer& m)
+        {
+            m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+            m.addEvent (juce::MidiMessage::allNotesOff (1), 100);
+            m.addEvent (juce::MidiMessage::allSoundOff (1), 200);
+            m.addEvent (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 100), 300);
+        });
+
+        run ("an empty block with MIDI", 0, [&] (juce::MidiBuffer& m)
+        {
+            m.addEvent (juce::MidiMessage::noteOn (1, 67, (juce::uint8) 100), 0);
+        });
+
+        run ("a block 8 times bigger than prepared", prepared * 8, [&] (juce::MidiBuffer& m)
+        {
+            for (int note = 40; note <= 90; note += 5)
+                m.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), note * 30);
+        });
+
+        for (int i = 0; i < 20; i++)
+            run ("plain blocks", prepared, [] (juce::MidiBuffer&) {});
+
+        g_allocationCount = 0;
+        t_countAllocations = true;
+        proc->reset();
+        t_countAllocations = false;
+
+        if (g_allocationCount != 0)
+        {
+            std::cerr << "    FAILED: reset(): " << g_allocationCount.load() << " allocations" << std::endl;
+            allPassed = false;
+        }
+
+        run ("the first block after reset()", prepared, [&] (juce::MidiBuffer& m)
+        {
+            m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+        });
+
+        std::cout << "    Largest MIDI buffer: " << largest << " of " << PianoAudioProcessor::midiBufferBytes << " bytes" << std::endl;
+
+        if (storageOf() != storage || largest > PianoAudioProcessor::midiBufferBytes)
+        {
+            std::cerr << "    FAILED: the MIDI buffers outgrew their storage" << std::endl;
+            allPassed = false;
+        }
+
+        if (allPassed)
+            std::cout << "    No allocations: PASSED" << std::endl;
+
+        return allPassed;
     }
 
     // CC64 holds note offs back until the pedal comes up. A key pressed again

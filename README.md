@@ -37,9 +37,15 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   sounding voices dropped from up to 35 to 15 and peak CPU from ~290% to ~80% of real time.
 
 **MIDI and parameters**
-- Handles *All Notes Off* and *All Sound Off* (CC 123 / 120), and resets voices when the
-  host resets the plugin.
-- MIDI is no longer allocated per block on the audio thread.
+- Handles *All Notes Off* (CC 123), which damps the notes, and *All Sound Off* (CC 120),
+  which silences everything at once, soundboard included. A host reset does the same as
+  All Sound Off and also drops queued audio and MIDI, so nothing from before it plays after.
+- MIDI handling doesn't allocate on the audio thread: its buffers are sized when the host
+  starts audio, and held sustain note offs are a fixed table. SysEx is ignored without being
+  copied. In a flood that fills the buffers, note offs and All Off are kept over everything
+  else, and if even they don't fit, an All Notes Off takes their place.
+- Host blocks larger than the size the host announced no longer lose audio: the block is
+  rendered a step at a time, so the output buffer stays small whatever the block size.
 - Note-ons no longer allocate memory: every note's buffers are prepared when the host
   starts audio (about 10 ms) and are only reused afterwards.
 - Fixed the *Hammer Position*, *Bridge Impedance*, *Bridge Horizontal Impedance* and
@@ -71,10 +77,12 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
 
 **Tests**
 - New edge-case tests (upsampling cap; extreme settings at 22.05, 44.1, 96 and 192 kHz)
-  and MIDI tests (All Notes Off / All Sound Off damp a held chord).
+  and MIDI tests (All Notes Off damps a held chord, All Sound Off silences it).
 - Parameter tests: Soundboard Size and Long Modes change the sound, and preparing notes
   ahead of time doesn't.
-- Processor tests run the plugin's own host-facing code, which the suite didn't build before.
+- Processor tests run the plugin's own host-facing code, which the suite didn't build before:
+  host block sizes from 0 to 5000 samples, reset at every position in the engine block, All
+  Sound Off, MIDI floods, and no heap allocations in `processBlock()`.
 - A missing reference render now fails instead of being written as the new baseline, and
   NaN can no longer slip through the comparisons.
 
@@ -185,12 +193,14 @@ ctest -C Release -L fast
 - **Unit Tests**: Filter, Hammer, MSD2Filter, ResampleFIR, DWGS (Digital Waveguide String) classes
 - **Engine Tests**: extreme settings and sample rates, MIDI handling, parameters
 - **Processor Tests**: the plugin's own `processBlock()`, driven as a host would: parameter
-  IDs, host order and engine mapping, latency and output across host block sizes, and the
-  sustain pedal
+  IDs, host order and engine mapping, latency and output across host block sizes, the
+  sustain pedal, reset and All Sound Off, full MIDI buffers, and no allocations on the audio
+  thread
 - **Integration Tests**: Scale test, Chord test, 4-minute stress test, compared against
   reference renders in `tests/reference/`
 - **Edge Case Tests**: Upsampling limits and extreme parameter settings at several sample rates
-- **MIDI Tests**: All Notes Off / All Sound Off
+- **MIDI Tests**: All Notes Off damps, All Sound Off silences, and a note struck after
+  All Sound Off doesn't bring back the old sound
 - **Parameter Tests**: Soundboard Size, Long Modes and note preparation
 
 ## Known limitations

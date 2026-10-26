@@ -124,6 +124,14 @@ Filter::Filter(int nmax_)
     xskip = xsize;
 }
 
+void Filter::clear()
+{
+    // Same sizes as the constructor allocates
+    int n4 = nmax / 4;
+    memset(x,0,2*size_t(n4+3)*sizeof(vec4));
+    memset(y,0,2*size_t(n4+3)*sizeof(vec4));
+}
+
 void Filter::init(int upsample_)
 {
     upsample = upsample_;

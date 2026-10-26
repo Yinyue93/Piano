@@ -55,7 +55,9 @@ class Reverb {
 public:
     Reverb(float Fs);
     void set(float size, float c1, float c3);
-    float reverb(float in); 
+    // Silences the soundboard, keeping its size and decay. Doesn't allocate.
+    void clear();
+    float reverb(float in);
     float probe();
     
 protected:

@@ -103,6 +103,11 @@ public:
     bool isActive();
     void deActivate();
 
+    // Stops the note at once (Piano::reset()). Its strings still hold the old
+    // sound, so they're cleared before the next strike: that keeps the cost
+    // out of the reset, which can run on the audio thread.
+    void cut();
+
     PianoNote* next = nullptr;
     PianoNote* prev = nullptr;
     int note;
@@ -129,6 +134,10 @@ public:
     static double freqTable[NUM_NOTES];
 
 protected:
+    // Zeroes everything the strings, filters and resamplers remember
+    void clearState();
+    bool needsClear = false;
+
     MSD2Filter bridge;
 
     bool bActive;
@@ -196,6 +205,9 @@ public:
     void prepareNotes();
     void triggerOn (int note, float velocity, float *tune);
     void allNotesOff();
+    // Silences everything now (All Sound Off, the host's reset): voices stop
+    // without damping and the soundboard is cleared. Doesn't allocate.
+    void reset();
 
     //vst crap
     void setParameter (int32_t index, float value);

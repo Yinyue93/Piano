@@ -481,6 +481,36 @@ void dwgs::damper (float c1, float c3, float gammaL, float gammaL2, int nDamper)
 
 }
 
+void dwgs::clear()
+{
+    d0.clear();
+    d1.clear();
+    d2.clear();
+    d3.clear();
+
+    loss.clear();
+    fracDelayTop.clear();
+    fracDelayBottom.clear();
+    hammerDelay.clear();
+    for (auto& d : dispersion)
+        d.clear();
+
+    for (auto& r : longModeResonator)
+        r.clear();
+
+    wave.clear();
+    wave0.clear();
+    wave1.clear();
+    Fl.clear();
+    F.fill (0.0f);
+    F4.fill (simde_mm_setzero_ps());
+
+    a0_0 = a0_1 = a0_2 = a0_3 = a0_4 = a0_5 = 0.0f;
+    a1_1 = a1_2 = a1_3 = a1_4 = a1_5 = 0.0f;
+    v0_0 = v0_1 = v0_2 = v0_3 = v0_4 = v0_5 = simde_mm_setzero_ps();
+    v1_1 = v1_2 = v1_3 = v1_4 = v1_5 = simde_mm_setzero_ps();
+}
+
 dwgs::~dwgs()
 {
     // AlignedBuffer members automatically deallocate in their destructors
