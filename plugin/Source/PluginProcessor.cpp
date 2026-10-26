@@ -426,12 +426,34 @@ void PianoAudioProcessor::releaseResources()
 {
 }
 
+void PianoAudioProcessor::updatePlayhead()
+{
+    double seconds = -1.0;
+    bool playing = false;
+
+    if (auto* playHead = getPlayHead())
+    {
+        if (auto position = playHead->getPosition())
+        {
+            if (auto time = position->getTimeInSeconds())
+                seconds = *time;
+
+            playing = position->getIsPlaying();
+        }
+    }
+
+    playheadSeconds.store (seconds);
+    playheadPlaying.store (playing);
+}
+
 void PianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
 
     auto numSamples = buffer.getNumSamples();
     auto lastSample = std::max (0, numSamples - 1);
+
+    updatePlayhead();
 
 	// Copy the host's MIDI to a buffer with storage of its own. Long messages
 	// (SysEx) are left out: the engine ignores them, and reading them as

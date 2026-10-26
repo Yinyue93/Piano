@@ -4,6 +4,7 @@
 #include "hammer.h"
 #include "dwgs.h"
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -2818,6 +2819,7 @@ public:
         allPassed &= testBoundedMidi();
         allPassed &= testMidiFlood();
         allPassed &= testNoAllocations();
+        allPassed &= testPlayhead();
 
         if (allPassed)
             std::cout << "All processor tests PASSED" << std::endl;
@@ -3410,6 +3412,110 @@ private:
     // floods, the pedal, All Off, empty and oversized blocks, and reset().
     // operator new is counted, and the MIDI buffers must stay in their storage
     // (same memory, within their capacity).
+    // The editor's time display reads where the host's transport (or the
+    // standalone app's MIDI file player) was at the start of the last block
+    bool testPlayhead()
+    {
+        std::cout << "  Testing the playback time..." << std::endl;
+
+        struct FixedPlayHead : juce::AudioPlayHead
+        {
+            juce::Optional<PositionInfo> getPosition() const override
+            {
+                if (! hasPosition)
+                    return {};
+
+                PositionInfo info;
+                info.setIsPlaying (playing);
+
+                if (seconds >= 0.0)
+                    info.setTimeInSeconds (seconds);
+
+                return info;
+            }
+
+            bool hasPosition = true;
+            bool playing = true;
+            double seconds = 83.4567;
+        };
+
+        auto proc = createProcessor (BLOCK_SIZE);
+        juce::AudioBuffer<float> buffer (2, BLOCK_SIZE);
+        juce::MidiBuffer midi;
+        FixedPlayHead playHead;
+
+        auto process = [&]
+        {
+            g_allocationCount = 0;
+            t_countAllocations = true;
+            proc->processBlock (buffer, midi);
+            t_countAllocations = false;
+            return g_allocationCount.load();
+        };
+
+        struct Check { const char* what; bool ok; };
+        std::vector<Check> checks;
+
+        int allocations = process();
+        checks.push_back ({ "without a playhead there's no time", proc->playheadSeconds.load() < 0.0 && ! proc->playheadPlaying.load() });
+
+        proc->setPlayHead (&playHead);
+        allocations += process();
+        checks.push_back ({ "the playing time wasn't passed on", proc->playheadSeconds.load() == 83.4567 && proc->playheadPlaying.load() });
+
+        playHead.playing = false;
+        playHead.seconds = 5.0;
+        allocations += process();
+        checks.push_back ({ "the stopped time wasn't passed on", proc->playheadSeconds.load() == 5.0 && ! proc->playheadPlaying.load() });
+
+        playHead.seconds = -1.0;
+        allocations += process();
+        checks.push_back ({ "a position without a time still shows the old time", proc->playheadSeconds.load() < 0.0 });
+
+        playHead.hasPosition = false;
+        allocations += process();
+        checks.push_back ({ "a playhead without a position still shows the old time", proc->playheadSeconds.load() < 0.0 });
+
+        proc->setPlayHead (nullptr);
+        checks.push_back ({ "reading the playhead allocated", allocations == 0 });
+
+        const std::pair<std::pair<double, bool>, const char*> formats[] = {
+            { { 83.4567, true },   "1:23.457" },
+            { { 5.0, false },      "0:05.000 stopped" },
+            { { 59.9996, true },   "1:00.000" },
+            { { 3725.25, true },   "62:05.250" },
+            { { 0.0, true },       "0:00.000" },
+            { { -1.0, false },     "No transport" },
+        };
+
+        for (auto& [in, expected] : formats)
+        {
+            auto text = PlaybackTimeDisplay::format (in.first, in.second);
+
+            if (text != expected)
+            {
+                std::cerr << "    FAILED: " << in.first << " s shows as \"" << text << "\", not \"" << expected << "\"" << std::endl;
+                checks.push_back ({ "formatting", false });
+            }
+        }
+
+        bool allPassed = true;
+
+        for (auto& c : checks)
+        {
+            if (! c.ok)
+            {
+                std::cerr << "    FAILED: " << c.what << std::endl;
+                allPassed = false;
+            }
+        }
+
+        if (allPassed)
+            std::cout << "    Playback time: PASSED" << std::endl;
+
+        return allPassed;
+    }
+
     bool testNoAllocations()
     {
         std::cout << "  Testing that the audio thread doesn't allocate..." << std::endl;

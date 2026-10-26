@@ -21,6 +21,51 @@ public:
 };
 
 //==============================================================================
+PlaybackTimeDisplay::PlaybackTimeDisplay (PianoAudioProcessor& p)
+    : proc (p)
+{
+    // Laid out like the faders' name and value
+    name.setText ("Time", juce::dontSendNotification);
+    name.setJustificationType (juce::Justification::centredRight);
+    value.setJustificationType (juce::Justification::centredLeft);
+    value.setText (format (-1.0, false), juce::dontSendNotification);
+
+    addAndMakeVisible (name);
+    addAndMakeVisible (value);
+
+    startTimerHz (30);
+}
+
+void PlaybackTimeDisplay::resized()
+{
+    auto r = getLocalBounds();
+
+    name.setBounds (r.removeFromLeft (100));
+    value.setBounds (r.reduced (2, 0));
+}
+
+juce::String PlaybackTimeDisplay::format (double seconds, bool playing)
+{
+    if (seconds < 0.0)
+        return "No transport";
+
+    auto ms = juce::int64 (seconds * 1000.0 + 0.5);
+    auto text = juce::String (ms / 60000) + ":"
+              + juce::String ((ms / 1000) % 60).paddedLeft ('0', 2) + "."
+              + juce::String (ms % 1000).paddedLeft ('0', 3);
+
+    return playing ? text : text + " stopped";
+}
+
+void PlaybackTimeDisplay::timerCallback()
+{
+    auto text = format (proc.playheadSeconds.load(), proc.playheadPlaying.load());
+
+    if (text != value.getText())
+        value.setText (text, juce::dontSendNotification);
+}
+
+//==============================================================================
 PianoAudioProcessorEditor::PianoAudioProcessorEditor (PianoAudioProcessor& p_)
     : ProcessorEditor (p_), proc (p_)
 {
@@ -33,6 +78,7 @@ PianoAudioProcessorEditor::PianoAudioProcessorEditor (PianoAudioProcessor& p_)
     keyboard.setAvailableRange (PIANO_MIN_NOTE, PIANO_MAX_NOTE);
     keyboard.setScrollButtonsVisible (false);
     addAndMakeVisible (keyboard);
+    addAndMakeVisible (playbackTime);
 
     for (auto pp : proc.getPluginParameters())
     {
@@ -97,6 +143,7 @@ void PianoAudioProcessorEditor::applyScale()
 
     patchBrowser.setTransform (t);
     keyboard.setTransform (t);
+    playbackTime.setTransform (t);
 
     for (auto c : controls)
         c->setTransform (t);
@@ -150,6 +197,9 @@ void PianoAudioProcessorEditor::resized()
             rc = r.removeFromLeft (w);
         }
     }
+
+    // In the space under the last column of faders
+    playbackTime.setBounds (rc.removeFromTop (h));
 
     applyScale();
 }

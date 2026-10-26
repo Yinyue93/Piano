@@ -4,6 +4,8 @@
 #include "qiano.h"
 #include "SustainPedal.h"
 
+#include <atomic>
+
 //==============================================================================
 class PianoAudioProcessor : public gin::Processor
 {
@@ -28,6 +30,12 @@ public:
 
     juce::MidiKeyboardState keyState;
     SustainPedal sustainPedal;
+
+    // The transport position at the start of the last block, for the
+    // editor's time display: the host's, or in the standalone app the MIDI
+    // file player's. Negative when there's no transport.
+    std::atomic<double> playheadSeconds { -1.0 };
+    std::atomic<bool> playheadPlaying { false };
 
     std::unique_ptr<Piano> piano;
 
@@ -54,6 +62,9 @@ public:
 	// host's block size.
 	gin::AudioMidiFifo		fifoOut {2, 2 * interalBlockSize};
 	juce::AudioSampleBuffer workBuffer {2, interalBlockSize};
+
+private:
+    void updatePlayhead();
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PianoAudioProcessor)

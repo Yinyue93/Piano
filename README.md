@@ -96,6 +96,10 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
 
 **Editor**
 - The editor window can be resized and scales uniformly.
+- A *Time* readout under the faders shows the transport position (the host's, or the
+  standalone app's MIDI file player's), so a sound heard while debugging can be found again
+  in the song. It shows where the block being rendered starts, so the sound you hear lags
+  it by the plugin's latency and the audio device's buffer.
 
 **Tests**
 - New edge-case tests (upsampling cap; extreme settings at 22.05, 44.1, 96 and 192 kHz)
@@ -171,7 +175,7 @@ because it locks the plugin file while it's loaded.
 
 The standalone app (`Piano_artefacts/Release/Standalone/`) can play MIDI files directly:
 open the sidebar, load a `.mid` file and press play. Sustain pedal events in the file are
-honored.
+honored. The *Time* readout in the editor follows the file's position.
 
 On Windows, choose **Windows Audio (Low Latency Mode)** as the audio device type for the
 lowest latency with ordinary sound cards. If you have an ASIO driver, use that instead.
