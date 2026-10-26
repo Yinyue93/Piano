@@ -46,3 +46,6 @@ Installer/win/bin
 Installer/_flat_presets
 .cache
 build-xcode
+
+# Local code review report
+/CODEBASE_REVIEW.md
