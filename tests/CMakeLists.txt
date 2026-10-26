@@ -107,7 +107,7 @@ enable_testing()
 
 set(FAST_TEST_GROUPS
     FilterUnitTest HammerUnitTest MSD2FilterUnitTest ResampleFIRUnitTest DWGSUnitTest
-    PianoEdgeCaseTest PianoMidiTest PianoParameterTest PianoProcessorTest)
+    PianoEdgeCaseTest PianoMidiTest PianoParameterTest PianoVoiceTest PianoProcessorTest)
 set(REFERENCE_TEST_GROUPS PianoScaleTest PianoChordTest PianoStressTest)
 
 foreach(group IN LISTS FAST_TEST_GROUPS REFERENCE_TEST_GROUPS)

@@ -20,6 +20,7 @@
 #include <vector>
 #include <atomic>
 #include <new>
+#include <thread>
 
 // Current test tracking for crash reporting
 static const char* g_currentTestName = "initialization";
@@ -2527,6 +2528,267 @@ private:
 // driven through processBlock() as a host would
 //==============================================================================
 
+class PianoVoiceTest
+{
+public:
+    bool run()
+    {
+        std::cout << "\nPiano Voice Tests" << std::endl;
+        std::cout << "=================" << std::endl;
+
+        bool allPassed = true;
+
+        allPassed &= testSilentStrikeRetires();
+        allPassed &= testQuietNotesSound();
+        allPassed &= testRetirementTiming();
+        allPassed &= testKeyboardRetires();
+        allPassed &= testParallelInstances();
+
+        if (allPassed)
+            std::cout << "All voice tests PASSED" << std::endl;
+        else
+            std::cerr << "Some voice tests FAILED" << std::endl;
+
+        return allPassed;
+    }
+
+private:
+    struct Result
+    {
+        float retiredAt = -1.0f;    // seconds, -1 if voices still sound at the end
+        int voicesAt = 0;           // voices sounding at probeAt
+        double energy = 0.0;        // output energy up to probeAt
+        bool finite = true;
+    };
+
+    // Strikes notes at 0 and lets go at offAt (never if negative), then
+    // renders until no voice sounds or maxSeconds have passed
+    static Result render (float Fs, std::vector<std::pair<int, float>> params, std::vector<int> notes,
+                          juce::uint8 velocity, float offAt, float maxSeconds, float probeAt = 0.0f)
+    {
+        Piano piano;
+        piano.init (Fs, BLOCK_SIZE);
+
+        for (int i = 0; i < NumParams; i++)
+            piano.setParameter (i, 0.5f);
+
+        for (auto [index, value] : params)
+            piano.setParameter (index, value);
+
+        piano.prepareNotes();
+
+        std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE);
+        float* channels[2] = { left.data(), right.data() };
+
+        Result r;
+        const int offSample = offAt < 0.0f ? -1 : int (offAt * Fs);
+        const int probeSample = int (probeAt * Fs);
+        const int end = int (maxSeconds * Fs);
+
+        for (int pos = 0; pos < end; pos += BLOCK_SIZE)
+        {
+            juce::MidiBuffer midi;
+
+            if (pos == 0)
+                for (int note : notes)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, note, velocity), 0);
+
+            if (offSample >= pos && offSample < pos + BLOCK_SIZE)
+                for (int note : notes)
+                    midi.addEvent (juce::MidiMessage::noteOff (1, note), offSample - pos);
+
+            piano.process (channels, BLOCK_SIZE, midi);
+
+            for (auto s : left)
+            {
+                r.finite &= std::isfinite (s);
+
+                if (pos < probeSample)
+                    r.energy += double (s) * s;
+            }
+
+            if (pos < probeSample && pos + BLOCK_SIZE >= probeSample)
+                r.voicesAt = piano.getNumVoices();
+
+            if (pos > 0 && piano.getNumVoices() == 0)
+            {
+                r.retiredAt = float (pos) / Fs;
+                break;
+            }
+        }
+
+        return r;
+    }
+
+    // With Hammer Spring Constant at 0 the hammer doesn't move the string, so
+    // the note never makes a sound. It used to stay active for ever: its
+    // energy and its loudest energy were both 0, and 0 < 1e-8 * 0 is false.
+    bool testSilentStrikeRetires()
+    {
+        std::cout << "  Testing a silent strike..." << std::endl;
+
+        auto r = render (SAMPLE_RATE, { { pHammerSpringConstant, 0.0f } }, { 60 }, 100, -1.0f, 5.0f, 0.5f);
+
+        std::cout << "    Energy " << r.energy << ", voices at 0.5 s " << r.voicesAt << ", retired at " << r.retiredAt << " s" << std::endl;
+
+        // It gets a full second before it can go, so not before 1 s
+        if (! r.finite || r.voicesAt != 1 || ! (r.retiredAt >= 1.0f && r.retiredAt < 1.5f))
+        {
+            std::cerr << "    FAILED: the silent note wasn't retired after a second" << std::endl;
+            return false;
+        }
+
+        std::cout << "    Silent strike: PASSED" << std::endl;
+        return true;
+    }
+
+    // The softest strike sounds through its first second, however quiet (the
+    // silence floor only applies after it), and a loud held note isn't taken
+    // for silence later on
+    bool testQuietNotesSound()
+    {
+        std::cout << "  Testing quiet and held notes..." << std::endl;
+
+        bool ok = true;
+
+        for (int note : { 21, 60, 108 })
+        {
+            auto soft = render (SAMPLE_RATE, {}, { note }, 1, -1.0f, 3.0f, 0.9f);
+            auto loud = render (SAMPLE_RATE, {}, { note }, 127, -1.0f, 3.0f, 2.0f);
+
+            std::cout << "    Note " << note << ": softest strike energy " << soft.energy << ", voices at 0.9 s " << soft.voicesAt
+                      << ", loudest at 2 s " << loud.voicesAt << std::endl;
+
+            if (! soft.finite || ! loud.finite || ! (soft.energy > 0.0) || soft.voicesAt != 1 || loud.voicesAt != 1)
+            {
+                std::cerr << "    FAILED: note " << note << " was retired while it still sounded" << std::endl;
+                ok = false;
+            }
+        }
+
+        if (ok)
+            std::cout << "    Quiet and held notes: PASSED" << std::endl;
+
+        return ok;
+    }
+
+    // The energy window was a second of samples in a 65536-sample ring at the
+    // string's rate, so it was shorter at high rates (a third of a second at
+    // 96 kHz) and empty at 65536 Hz, and notes finished at different times.
+    // A released note must now finish at about the same time at any rate.
+    bool testRetirementTiming()
+    {
+        std::cout << "  Testing retirement timing across sample rates..." << std::endl;
+
+        bool ok = true;
+
+        for (float downsample : { 0.0f, 1.0f })
+        {
+            float reference = -1.0f;
+
+            for (float Fs : { 44100.0f, 48000.0f, 65536.0f, 96000.0f, 192000.0f })
+            {
+                auto r = render (Fs, { { pDownsample, downsample } }, { 60 }, 100, 0.1f, 10.0f);
+
+                std::cout << "    Downsample " << downsample << ", " << Fs << " Hz: retired at " << r.retiredAt << " s" << std::endl;
+
+                if (reference < 0.0f)
+                    reference = r.retiredAt;
+
+                if (! r.finite || ! (r.retiredAt > 1.0f) || ! (std::abs (r.retiredAt - reference) <= 0.15f * reference))
+                {
+                    std::cerr << "    FAILED: retired at " << r.retiredAt << " s, against " << reference << " s at 44.1 kHz" << std::endl;
+                    ok = false;
+                }
+            }
+        }
+
+        if (ok)
+            std::cout << "    Retirement timing: PASSED" << std::endl;
+
+        return ok;
+    }
+
+    // Every key struck and let go: all the voices finish
+    bool testKeyboardRetires()
+    {
+        std::cout << "  Testing the whole keyboard..." << std::endl;
+
+        std::vector<int> notes;
+        for (int n = PIANO_MIN_NOTE; n <= PIANO_MAX_NOTE; n++)
+            notes.push_back (n);
+
+        auto r = render (SAMPLE_RATE, {}, notes, 100, 0.5f, 20.0f, 0.4f);
+
+        std::cout << "    Voices at 0.4 s " << r.voicesAt << ", all retired at " << r.retiredAt << " s" << std::endl;
+
+        if (! r.finite || r.voicesAt != int (notes.size()) || ! (r.retiredAt > 1.0f))
+        {
+            std::cerr << "    FAILED: the voices didn't all finish" << std::endl;
+            return false;
+        }
+
+        std::cout << "    Whole keyboard: PASSED" << std::endl;
+        return true;
+    }
+
+    // Instances set up at once on several threads, as hosts do, must sound
+    // like one set up alone. They used to all rewrite a shared frequency table.
+    bool testParallelInstances()
+    {
+        std::cout << "  Testing instances set up in parallel..." << std::endl;
+
+        auto renderNotes = []
+        {
+            Piano piano;
+            piano.init (SAMPLE_RATE, BLOCK_SIZE);
+
+            for (int i = 0; i < NumParams; i++)
+                piano.setParameter (i, 0.5f);
+
+            std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE), out;
+            float* channels[2] = { left.data(), right.data() };
+
+            for (int b = 0; b < 8; b++)
+            {
+                juce::MidiBuffer midi;
+
+                if (b == 0)
+                    for (int note : { 21, 60, 108 })
+                        midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+
+                piano.process (channels, BLOCK_SIZE, midi);
+                out.insert (out.end(), left.begin(), left.end());
+            }
+
+            return out;
+        };
+
+        const auto alone = renderNotes();
+
+        std::vector<std::vector<float>> results (8);
+        std::vector<std::thread> threads;
+
+        for (auto& r : results)
+            threads.emplace_back ([&r, &renderNotes] { r = renderNotes(); });
+
+        for (auto& t : threads)
+            t.join();
+
+        for (auto& r : results)
+        {
+            if (r != alone)
+            {
+                std::cerr << "    FAILED: an instance set up in parallel sounded different" << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "    Instances set up in parallel: PASSED" << std::endl;
+        return true;
+    }
+};
+
 class PianoProcessorTest
 {
 public:
@@ -3570,6 +3832,7 @@ int main(int argc, char* argv[])
         { "PianoEdgeCaseTest",   [] { return PianoEdgeCaseTest().run(); } },
         { "PianoMidiTest",       [] { return PianoMidiTest().run(); } },
         { "PianoParameterTest",  [] { return PianoParameterTest().run(); } },
+        { "PianoVoiceTest",      [] { return PianoVoiceTest().run(); } },
         // The plugin's processor, as a host drives it
         { "PianoProcessorTest",  [] { return PianoProcessorTest().run(); } },
         // Renders compared with the references

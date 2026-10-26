@@ -35,6 +35,15 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   until the CPU couldn't keep up, which caused crackling. Each note now goes through a
   2 Hz DC blocker and the energy is accumulated in double precision. In a dense test song,
   sounding voices dropped from up to 35 to 15 and peak CPU from ~290% to ~80% of real time.
+- Notes that never made a sound (with *Hammer Spring Constant* at 0, for example) also never
+  finished, because their loudest moment was silence too. A note now also finishes once its
+  last second is below an absolute floor (−180 dB), after a first second's grace so its
+  attack always arrives.
+- A note finishes when its last second is 80 dB below its loudest second, but that second
+  was a fixed 65,536-sample ring at the string's internal rate, so it shrank at high sample
+  rates (to a third of a second at 96 kHz, and none at all at 65,536 Hz) and notes were cut
+  early. The energy is now measured at the host rate in 32 blocks per second, so the window
+  is a second at any rate. This also saves 256 KB per note.
 
 **MIDI and parameters**
 - Handles *All Notes Off* (CC 123), which damps the notes, and *All Sound Off* (CC 120),
@@ -82,6 +91,9 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   plugin was reloaded. The filters are now worked out once for every factor and a note
   picks the right one on each strike.
 
+- Plugin instances set up at the same time no longer share a writable frequency table:
+  it's built once, thread-safely, and never changes.
+
 **Editor**
 - The editor window can be resized and scales uniformly.
 
@@ -93,6 +105,9 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
 - Processor tests run the plugin's own host-facing code, which the suite didn't build before:
   host block sizes from 0 to 5000 samples, reset at every position in the engine block, All
   Sound Off, MIDI floods, MIDI channels, and no heap allocations in `processBlock()`.
+- Voice tests: a silent strike finishes, quiet notes aren't taken for silence, a released note
+  finishes at the same time from 44.1 to 192 kHz, every key struck at once all finish, and
+  instances set up in parallel sound the same.
 - Changing *Downsample*, *Hammer Position* or *String Length* and then playing sounds
   exactly like a fresh engine with those settings.
 - A missing reference render now fails instead of being written as the new baseline, and
@@ -213,6 +228,8 @@ ctest -C Release -L fast
 - **Edge Case Tests**: Upsampling limits and extreme parameter settings at several sample rates
 - **MIDI Tests**: All Notes Off damps, All Sound Off silences, and a note struck after
   All Sound Off doesn't bring back the old sound
+- **Voice Tests**: when notes finish (silent, quiet and held notes, sample rates, the whole
+  keyboard) and instances set up in parallel
 - **Parameter Tests**: Soundboard Size, Long Modes, note preparation, and settings changed
   after notes were played
 

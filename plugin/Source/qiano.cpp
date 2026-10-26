@@ -72,21 +72,28 @@ int getParameterIndex (const char *key)
     return -1;
 }
 
-double PianoNote::freqTable[NUM_NOTES];
-
-void PianoNote::fillFrequencyTable()
+double PianoNote::frequency (int note)
 {
-    double NOTE_UP_SCALAR = pow (2.0, 1.0 / 12.0);
-    double A = 6.875;	// A
-    A *= NOTE_UP_SCALAR;	// A#
-    A *= NOTE_UP_SCALAR;	// B
-    A *= NOTE_UP_SCALAR;	// C, frequency of midi note 0
-
-    for (int i = 0; (i < NUM_NOTES); i++)	// 128 midi notes
+    static const auto table = []
     {
-        freqTable[i] = A;
-        A *= NOTE_UP_SCALAR;
-    }
+        std::array<double, NUM_NOTES> t {};
+
+        double NOTE_UP_SCALAR = pow (2.0, 1.0 / 12.0);
+        double A = 6.875;	// A
+        A *= NOTE_UP_SCALAR;	// A#
+        A *= NOTE_UP_SCALAR;	// B
+        A *= NOTE_UP_SCALAR;	// C, frequency of midi note 0
+
+        for (auto& f : t)	// 128 midi notes
+        {
+            f = A;
+            A *= NOTE_UP_SCALAR;
+        }
+
+        return t;
+    }();
+
+    return table[size_t (note)];
 }
 
 float PianoNote::goUp()
@@ -97,7 +104,9 @@ float PianoNote::goUp()
         upSampleDelayNeeded--;
     }
 
-    return goUpDelayed();
+    float out = goUpDelayed();
+    measureEnergy (out);
+    return out;
 }
 
 float PianoNote::goUpDelayed()
@@ -239,11 +248,6 @@ float PianoNote::go()
     //cout << output << "\n";
     output = blockDC (output);
 
-    float delayed = outputdelay.goDelay(output);
-    energy = energy + output*output - delayed*delayed;
-    if(energy>maxEnergy)
-        maxEnergy = energy;
-
     tTranRead = (tTranRead + 1)%TranBufferSize;
 
     return output;
@@ -320,12 +324,6 @@ vec4 PianoNote::go4()
         x = blockDC (x);
     output = simde_mm_load_ps (o);
 
-    vec4 delayed = outputdelay.goDelay4(output);
-    energy = energy + sum4 (simde_mm_sub_ps (simde_mm_mul_ps (output, output), simde_mm_mul_ps (delayed, delayed)));
-    if(energy>maxEnergy)
-        maxEnergy = energy;
-
-
     tTranRead = (tTranRead + 4)%TranBufferSize;
 
     return output;
@@ -376,7 +374,6 @@ void Piano::init (float Fs_, int blockSize_)
     Fs = Fs_;
     blockSize = blockSize_;
     voiceList = nullptr;
-    PianoNote::fillFrequencyTable();
     ResampleFIR::prepareKernels();
 
     for (int k = PIANO_MIN_NOTE; k <= PIANO_MAX_NOTE; k++)
@@ -418,7 +415,7 @@ PianoNote::PianoNote (int note_, int Fs_, Piano* piano_)
 {
     Fs = Fs_;
     note = note_;
-    f = float (freqTable[note]);
+    f = float (frequency (note));
     piano = piano_;
 
     if (note<31)
@@ -438,7 +435,7 @@ PianoNote::PianoNote (int note_, int Fs_, Piano* piano_)
     }
     hammer = std::make_unique<Hammer>();
 
-    outputdelay.setDelay(Fs);
+    blockLength = std::max (1, int (std::lround (double (Fs) / EnergyBlocks)));
 
     longDelay = 8;
     tUp = 0;
@@ -450,10 +447,58 @@ PianoNote::PianoNote (int note_, int Fs_, Piano* piano_)
     bActive = false;
 }
 
+void PianoNote::measureEnergy (float x)
+{
+    blockSum += double (x) * double (x);
+
+    if (++blockPos < blockLength)
+        return;
+
+    blockEnergy[size_t (blockIndex)] = blockSum;
+    blockIndex = (blockIndex + 1) % EnergyBlocks;
+    blockSum = 0.0;
+    blockPos = 0;
+    blocksMeasured = std::min (blocksMeasured + 1, EnergyBlocks);
+
+    energy = 0.0;
+    for (auto e : blockEnergy)
+        energy += e;
+
+    maxEnergy = std::max (maxEnergy, energy);
+}
+
+void PianoNote::resetEnergy()
+{
+    blockEnergy.fill (0.0);
+    blockSum = 0.0;
+    energy = 0.0;
+    maxEnergy = 0.0;
+    blockPos = 0;
+    blockIndex = 0;
+    blocksMeasured = 0;
+}
+
 bool PianoNote::isDone()
 {
-    //return false;
-    return (energy < 1e-8 * maxEnergy);
+    // Broken output (NaN or infinity) ends the note, and its strings are
+    // cleared before it's struck again
+    if (! std::isfinite (energy))
+    {
+        needsClear = true;
+        return true;
+    }
+
+    // A note gets a full second before it can finish, so it isn't retired
+    // before its attack arrives
+    if (blocksMeasured < EnergyBlocks)
+        return false;
+
+    // 60 dB below the loudest second, or below an absolute floor (an RMS of
+    // 1e-9, far under what a 24-bit output can carry). The floor ends notes
+    // that never made a sound, such as with Hammer Spring Constant at 0: their
+    // loudest second is 0 too.
+    const double floor = 1e-18 * blockLength * EnergyBlocks;
+    return energy <= std::max (1e-8 * maxEnergy, floor);
 }
 
 bool PianoNote::triggerOn (float velocity, float* tune)
@@ -646,8 +691,7 @@ bool PianoNote::triggerOn (float velocity, float* tune)
 
     hammer->set(resample*Fs,m,K,p,Z,alpha,maxDel2+128);
     hammer->strike(velocity);
-    maxEnergy = 0.0;
-    energy = 0.0;
+    resetEnergy();
 
 
     tranBridgeForce = Z;
@@ -658,7 +702,6 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     longBridgeForce /= resample;
     longTranBridgeForce /= resample;
 
-    outputdelay.clear();
     longHP.create (0.15f * downsample, 0.5f);
 
     // The resampling filters depend on the up and downsampling factors, which
@@ -737,8 +780,7 @@ void PianoNote::clearState()
 
     dcX1 = 0.0f;
     dcY1 = 0.0f;
-    energy = 0.0;
-    maxEnergy = 0.0;
+    resetEnergy();
 }
 
 bool PianoNote::isActive()
@@ -846,6 +888,21 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
     }
 
     process (outS, sampleFrames - delta, delta);
+}
+
+int Piano::getNumVoices() const
+{
+    int n = 0;
+    PianoNote* v = voiceList;
+
+    do
+    {
+        if (v)
+            n++;
+
+    } while (v && (v=v->next) && (v != voiceList));
+
+    return n;
 }
 
 // Drops the dampers on every sounding note, for All Notes Off

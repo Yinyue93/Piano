@@ -115,13 +115,22 @@ public:
 
     bool isDone();
 
-    // isDone() compares the energy of the last second (a running sum: add the new
-    // sample's power, take away the one leaving the window) with the note's peak.
-    // It's double because float rounding left a residue above the 1e-8 threshold,
-    // so silent notes never finished.
-    double maxEnergy = 0.0;
+    // isDone() compares the energy of the note's last second with its loudest
+    // second. The output is measured at the host rate in blocks of 1/32 s, and
+    // the last 32 blocks make the second, so the window is a second at any
+    // sample rate or resampling. Sums are double: float rounding left a
+    // residue above the 1e-8 threshold, so silent notes never finished.
+    static constexpr int EnergyBlocks = 32;
+    void measureEnergy (float x);
+    void resetEnergy();
+    std::array<double, EnergyBlocks> blockEnergy {};
+    double blockSum = 0.0;
     double energy = 0.0;
-    Delay<65536> outputdelay;
+    double maxEnergy = 0.0;
+    int blockLength = 1;
+    int blockPos = 0;
+    int blockIndex = 0;
+    int blocksMeasured = 0;
 
     // Strings can settle with a constant offset (DC) on the bridge force. It's
     // inaudible but never decays, so it kept notes alive (and using CPU) forever.
@@ -130,8 +139,9 @@ public:
     float dcR = 0.0f;
     float dcX1 = 0.0f;
     float dcY1 = 0.0f;
-    static void fillFrequencyTable();
-    static double freqTable[NUM_NOTES];
+    // Equal temperament, A4 = 440 Hz. The table is built once, on first use,
+    // and never changes, so instances can share it from any thread.
+    static double frequency (int note);
 
 protected:
     // Zeroes everything the strings, filters and resamplers remember
@@ -220,6 +230,9 @@ public:
     // Stops at once the notes only this channel was playing, and silences the
     // soundboard too once nothing sounds
     void allSoundOff (int channel);
+
+    // The notes sounding now
+    int getNumVoices() const;
 
     //vst crap
     void setParameter (int32_t index, float value);
