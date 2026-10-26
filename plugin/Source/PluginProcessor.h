@@ -32,7 +32,11 @@ public:
     std::unique_ptr<Piano> piano;
 
     juce::Array<const gin::Parameter*> params;
-	
+
+    // The constructor launches the shared CrashReporter app if it's installed.
+    // Tests turn this off.
+    static inline bool launchCrashReporter = true;
+
 	constexpr static int interalBlockSize = 32;
 
 	// The engine renders fixed blocks of interalBlockSize. Incoming MIDI waits in

@@ -3,6 +3,7 @@
 #include "filter.h"
 #include "hammer.h"
 #include "dwgs.h"
+#include "PluginProcessor.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -125,6 +127,245 @@ const std::vector<ChordDefinition> TEST_CHORDS = {
     { "C Power Chord", 48, { 0, 7, 12 } },
 };
 
+//==============================================================================
+// Reference renders
+//==============================================================================
+
+// Set by --update-references. Without it a missing reference fails the test,
+// so a wrong path or a deleted file can't turn a test run into a baseline run.
+static bool g_updateReferences = false;
+
+static bool allFinite (const juce::AudioBuffer<float>& buffer)
+{
+    for (int ch = 0; ch < buffer.getNumChannels(); ch++)
+    {
+        auto data = buffer.getReadPointer (ch);
+
+        for (int i = 0; i < buffer.getNumSamples(); i++)
+            if (! std::isfinite (data[i]))
+                return false;
+    }
+
+    return true;
+}
+
+static bool saveWavFile (const juce::File& file, const juce::AudioBuffer<float>& buffer)
+{
+    file.getParentDirectory().createDirectory();
+    file.deleteFile();
+
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::FileOutputStream> outputStream (file.createOutputStream());
+
+    if (outputStream == nullptr)
+    {
+        std::cerr << "Could not create output stream for: " << file.getFullPathName() << std::endl;
+        return false;
+    }
+
+    // 32-bit float to preserve full dynamic range
+    std::unique_ptr<juce::AudioFormatWriter> writer (
+        wavFormat.createWriterFor (outputStream.get(), SAMPLE_RATE,
+                                   static_cast<unsigned int> (buffer.getNumChannels()), 32, {}, 0));
+
+    if (writer == nullptr)
+    {
+        std::cerr << "Could not create WAV writer" << std::endl;
+        return false;
+    }
+
+    outputStream.release(); // writer takes ownership
+
+    return writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples());
+}
+
+static std::unique_ptr<juce::AudioBuffer<float>> loadWavFile (const juce::File& file)
+{
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+
+    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
+
+    if (reader == nullptr)
+    {
+        std::cerr << "Could not create reader for: " << file.getFullPathName() << std::endl;
+        return nullptr;
+    }
+
+    // The tests render at SAMPLE_RATE: a reference made at another rate can't
+    // be compared sample by sample
+    if (reader->sampleRate != SAMPLE_RATE)
+    {
+        std::cerr << "Reference sample rate is " << reader->sampleRate << " Hz, the tests render at "
+                  << SAMPLE_RATE << " Hz" << std::endl;
+        return nullptr;
+    }
+
+    auto buffer = std::make_unique<juce::AudioBuffer<float>> (static_cast<int> (reader->numChannels),
+                                                              static_cast<int> (reader->lengthInSamples));
+
+    reader->read (buffer.get(), 0, static_cast<int> (reader->lengthInSamples), 0, true, true);
+
+    std::cout << "Loaded reference: " << reader->lengthInSamples << " samples, "
+              << reader->numChannels << " channels" << std::endl;
+
+    return buffer;
+}
+
+static bool compareAudio (const juce::AudioBuffer<float>& generated, const juce::AudioBuffer<float>& reference)
+{
+    std::cout << "\nComparing audio..." << std::endl;
+
+    // NaN fails every comparison below, so it has to be ruled out first
+    if (! allFinite (generated))
+    {
+        std::cerr << "Generated audio contains NaN or infinite samples" << std::endl;
+        return false;
+    }
+
+    if (! allFinite (reference))
+    {
+        std::cerr << "Reference audio contains NaN or infinite samples" << std::endl;
+        return false;
+    }
+
+    int genSamples = generated.getNumSamples();
+    int refSamples = reference.getNumSamples();
+
+    if (genSamples != refSamples)
+    {
+        std::cerr << "Sample count mismatch! Generated: " << genSamples
+                  << ", Reference: " << refSamples << std::endl;
+        return false;
+    }
+
+    int genChannels = generated.getNumChannels();
+    int refChannels = reference.getNumChannels();
+
+    if (genChannels != refChannels)
+    {
+        std::cerr << "Channel count mismatch! Generated: " << genChannels
+                  << ", Reference: " << refChannels << std::endl;
+        return false;
+    }
+
+    float genMaxLevel = generated.getMagnitude (0, genSamples);
+    float refMaxLevel = reference.getMagnitude (0, refSamples);
+
+    std::cout << "Generated max level: " << genMaxLevel << std::endl;
+    std::cout << "Reference max level: " << refMaxLevel << std::endl;
+
+    // Check that audio was produced (not silence)
+    if (genMaxLevel < 0.01f)
+    {
+        std::cerr << "Generated audio is too quiet (possibly silence)" << std::endl;
+        return false;
+    }
+
+    if (refMaxLevel < 0.01f)
+    {
+        std::cerr << "Reference audio is too quiet (possibly silence)" << std::endl;
+        return false;
+    }
+
+    // Check that levels are in a similar range (within 50% of each other)
+    float levelRatio = genMaxLevel / refMaxLevel;
+    if (levelRatio < 0.5f || levelRatio > 2.0f)
+    {
+        std::cerr << "Audio levels differ significantly! Ratio: " << levelRatio << std::endl;
+        return false;
+    }
+
+    // Calculate RMS difference for each channel
+    double totalRmsDifference = 0.0;
+
+    for (int channel = 0; channel < genChannels; ++channel)
+    {
+        const float* genData = generated.getReadPointer (channel);
+        const float* refData = reference.getReadPointer (channel);
+
+        double sumSquaredDiff = 0.0;
+        float maxDiff = 0.0f;
+        int maxDiffSample = 0;
+
+        for (int i = 0; i < genSamples; ++i)
+        {
+            float diff = genData[i] - refData[i];
+            sumSquaredDiff += static_cast<double> (diff * diff);
+
+            if (std::abs (diff) > maxDiff)
+            {
+                maxDiff = std::abs (diff);
+                maxDiffSample = i;
+            }
+        }
+
+        double rms = std::sqrt (sumSquaredDiff / genSamples);
+        totalRmsDifference += rms;
+
+        std::cout << "Channel " << channel << ":" << std::endl;
+        std::cout << "  RMS difference: " << rms << std::endl;
+        std::cout << "  Max difference: " << maxDiff << " at sample " << maxDiffSample << std::endl;
+    }
+
+    double avgRmsDifference = totalRmsDifference / genChannels;
+    std::cout << "\nAverage RMS difference: " << avgRmsDifference << std::endl;
+    std::cout << "Threshold: " << MAX_RMS_DIFFERENCE << std::endl;
+
+    if (avgRmsDifference <= MAX_RMS_DIFFERENCE)
+    {
+        std::cout << "\nTest PASSED" << std::endl;
+        return true;
+    }
+
+    std::cerr << "\nTest FAILED - Audio output differs from reference!" << std::endl;
+    return false;
+}
+
+// Compares a render with its reference, or rewrites the reference when run
+// with --update-references
+static bool checkAgainstReference (const juce::AudioBuffer<float>& generated, const juce::File& referenceFile)
+{
+    if (g_updateReferences)
+    {
+        if (! allFinite (generated))
+        {
+            std::cerr << "Generated audio contains NaN or infinite samples, not saving it" << std::endl;
+            return false;
+        }
+
+        std::cout << "Updating reference: " << referenceFile.getFullPathName() << std::endl;
+
+        if (! saveWavFile (referenceFile, generated))
+        {
+            std::cerr << "Failed to save reference file" << std::endl;
+            return false;
+        }
+
+        std::cout << "Test PASSED (reference updated)" << std::endl;
+        return true;
+    }
+
+    if (! referenceFile.existsAsFile())
+    {
+        std::cerr << "Reference file not found: " << referenceFile.getFullPathName() << std::endl;
+        std::cerr << "Pass the reference folder (tests/reference) as the first argument, or run with "
+                     "--update-references to create it" << std::endl;
+        return false;
+    }
+
+    std::cout << "Loading reference file: " << referenceFile.getFullPathName() << std::endl;
+    auto referenceAudio = loadWavFile (referenceFile);
+
+    if (referenceAudio == nullptr)
+    {
+        std::cerr << "Failed to load reference file" << std::endl;
+        return false;
+    }
+
+    return compareAudio (generated, *referenceAudio);
+}
+
 class PianoScaleTest
 {
 public:
@@ -148,36 +389,7 @@ public:
 
         std::cout << "Generated " << generatedAudio->getNumSamples() << " samples" << std::endl;
 
-        // Reference file path
-        juce::File referenceFile(referencePath + "/piano_scale_reference.wav");
-
-        if (!referenceFile.existsAsFile())
-        {
-            // First run - create reference file
-            std::cout << "Reference file not found. Creating reference: " << referenceFile.getFullPathName() << std::endl;
-
-            if (!saveWavFile(referenceFile, *generatedAudio))
-            {
-                std::cerr << "Failed to save reference file" << std::endl;
-                return false;
-            }
-
-            std::cout << "Reference file created successfully." << std::endl;
-            std::cout << "Test PASSED (reference generated)" << std::endl;
-            return true;
-        }
-
-        // Load reference file
-        std::cout << "Loading reference file: " << referenceFile.getFullPathName() << std::endl;
-        auto referenceAudio = loadWavFile(referenceFile);
-        if (referenceAudio == nullptr)
-        {
-            std::cerr << "Failed to load reference file" << std::endl;
-            return false;
-        }
-
-        // Compare audio
-        return compareAudio(*generatedAudio, *referenceAudio);
+        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_scale_reference.wav"));
     }
 
 private:
@@ -284,166 +496,6 @@ private:
 
         return outputBuffer;
     }
-
-    bool saveWavFile(const juce::File& file, const juce::AudioBuffer<float>& buffer)
-    {
-        // Ensure parent directory exists
-        file.getParentDirectory().createDirectory();
-
-        juce::WavAudioFormat wavFormat;
-        std::unique_ptr<juce::FileOutputStream> outputStream(file.createOutputStream());
-
-        if (outputStream == nullptr)
-        {
-            std::cerr << "Could not create output stream for: " << file.getFullPathName() << std::endl;
-            return false;
-        }
-
-        std::unique_ptr<juce::AudioFormatWriter> writer(
-            wavFormat.createWriterFor(
-                outputStream.get(),
-                SAMPLE_RATE,
-                static_cast<unsigned int>(buffer.getNumChannels()),
-                32,  // 32-bit float to preserve full dynamic range
-                {},
-                0
-            )
-        );
-
-        if (writer == nullptr)
-        {
-            std::cerr << "Could not create WAV writer" << std::endl;
-            return false;
-        }
-
-        outputStream.release(); // writer takes ownership
-
-        bool success = writer->writeFromAudioSampleBuffer(buffer, 0, buffer.getNumSamples());
-
-        return success;
-    }
-
-    std::unique_ptr<juce::AudioBuffer<float>> loadWavFile(const juce::File& file)
-    {
-        juce::AudioFormatManager formatManager;
-        formatManager.registerBasicFormats();
-
-        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-
-        if (reader == nullptr)
-        {
-            std::cerr << "Could not create reader for: " << file.getFullPathName() << std::endl;
-            return nullptr;
-        }
-
-        auto buffer = std::make_unique<juce::AudioBuffer<float>>(
-            static_cast<int>(reader->numChannels),
-            static_cast<int>(reader->lengthInSamples)
-        );
-
-        reader->read(buffer.get(), 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
-
-        std::cout << "Loaded reference: " << reader->lengthInSamples << " samples, "
-                  << reader->numChannels << " channels" << std::endl;
-
-        return buffer;
-    }
-
-    bool compareAudio(const juce::AudioBuffer<float>& generated, const juce::AudioBuffer<float>& reference)
-    {
-        std::cout << "\nComparing audio..." << std::endl;
-
-        // First, verify that audio was actually produced
-        float genMaxLevel = generated.getMagnitude(0, generated.getNumSamples());
-        float refMaxLevel = reference.getMagnitude(0, reference.getNumSamples());
-
-        std::cout << "Generated max level: " << genMaxLevel << std::endl;
-        std::cout << "Reference max level: " << refMaxLevel << std::endl;
-
-        // Check that audio was produced (not silence)
-        if (genMaxLevel < 0.01f)
-        {
-            std::cerr << "Generated audio is too quiet (possibly silence)" << std::endl;
-            return false;
-        }
-
-        // Check that levels are in a similar range (within 50% of each other)
-        float levelRatio = genMaxLevel / refMaxLevel;
-        if (levelRatio < 0.5f || levelRatio > 2.0f)
-        {
-            std::cerr << "Audio levels differ significantly! Ratio: " << levelRatio << std::endl;
-            return false;
-        }
-
-        // Check sample counts
-        int genSamples = generated.getNumSamples();
-        int refSamples = reference.getNumSamples();
-
-        if (genSamples != refSamples)
-        {
-            std::cerr << "Sample count mismatch! Generated: " << genSamples
-                      << ", Reference: " << refSamples << std::endl;
-            return false;
-        }
-
-        // Check channel counts
-        int genChannels = generated.getNumChannels();
-        int refChannels = reference.getNumChannels();
-
-        if (genChannels != refChannels)
-        {
-            std::cerr << "Channel count mismatch! Generated: " << genChannels
-                      << ", Reference: " << refChannels << std::endl;
-            return false;
-        }
-
-        // Calculate RMS difference for each channel
-        double totalRmsDifference = 0.0;
-
-        for (int channel = 0; channel < genChannels; ++channel)
-        {
-            const float* genData = generated.getReadPointer(channel);
-            const float* refData = reference.getReadPointer(channel);
-
-            double sumSquaredDiff = 0.0;
-            float maxDiff = 0.0f;
-            int maxDiffSample = 0;
-
-            for (int i = 0; i < genSamples; ++i)
-            {
-                float diff = genData[i] - refData[i];
-                sumSquaredDiff += static_cast<double>(diff * diff);
-
-                if (std::abs(diff) > maxDiff)
-                {
-                    maxDiff = std::abs(diff);
-                    maxDiffSample = i;
-                }
-            }
-
-            double rms = std::sqrt(sumSquaredDiff / genSamples);
-            totalRmsDifference += rms;
-
-            std::cout << "Channel " << channel << ":" << std::endl;
-            std::cout << "  RMS difference: " << rms << std::endl;
-            std::cout << "  Max difference: " << maxDiff << " at sample " << maxDiffSample << std::endl;
-        }
-
-        double avgRmsDifference = totalRmsDifference / genChannels;
-        std::cout << "\nAverage RMS difference: " << avgRmsDifference << std::endl;
-        std::cout << "Threshold: " << MAX_RMS_DIFFERENCE << std::endl;
-
-        if (avgRmsDifference <= MAX_RMS_DIFFERENCE)
-        {
-            std::cout << "\nTest PASSED" << std::endl;
-            return true;
-        }
-        else
-        {
-            std::cerr << "\nTest FAILED - Audio output differs from reference!" << std::endl;
-            return false;
-        }
-    }
 };
 
 class PianoChordTest
@@ -468,32 +520,7 @@ public:
 
         std::cout << "Generated " << generatedAudio->getNumSamples() << " samples" << std::endl;
 
-        juce::File referenceFile(referencePath + "/piano_chord_reference.wav");
-
-        if (!referenceFile.existsAsFile())
-        {
-            std::cout << "Reference file not found. Creating reference: " << referenceFile.getFullPathName() << std::endl;
-
-            if (!saveWavFile(referenceFile, *generatedAudio))
-            {
-                std::cerr << "Failed to save reference file" << std::endl;
-                return false;
-            }
-
-            std::cout << "Reference file created successfully." << std::endl;
-            std::cout << "Test PASSED (reference generated)" << std::endl;
-            return true;
-        }
-
-        std::cout << "Loading reference file: " << referenceFile.getFullPathName() << std::endl;
-        auto referenceAudio = loadWavFile(referenceFile);
-        if (referenceAudio == nullptr)
-        {
-            std::cerr << "Failed to load reference file" << std::endl;
-            return false;
-        }
-
-        return compareAudio(*generatedAudio, *referenceAudio);
+        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_chord_reference.wav"));
     }
 
 private:
@@ -595,156 +622,6 @@ private:
 
         return outputBuffer;
     }
-
-    bool saveWavFile(const juce::File& file, const juce::AudioBuffer<float>& buffer)
-    {
-        file.getParentDirectory().createDirectory();
-
-        juce::WavAudioFormat wavFormat;
-        std::unique_ptr<juce::FileOutputStream> outputStream(file.createOutputStream());
-
-        if (outputStream == nullptr)
-        {
-            std::cerr << "Could not create output stream for: " << file.getFullPathName() << std::endl;
-            return false;
-        }
-
-        std::unique_ptr<juce::AudioFormatWriter> writer(
-            wavFormat.createWriterFor(
-                outputStream.get(),
-                SAMPLE_RATE,
-                static_cast<unsigned int>(buffer.getNumChannels()),
-                32,
-                {},
-                0
-            )
-        );
-
-        if (writer == nullptr)
-        {
-            std::cerr << "Could not create WAV writer" << std::endl;
-            return false;
-        }
-
-        outputStream.release();
-        return writer->writeFromAudioSampleBuffer(buffer, 0, buffer.getNumSamples());
-    }
-
-    std::unique_ptr<juce::AudioBuffer<float>> loadWavFile(const juce::File& file)
-    {
-        juce::AudioFormatManager formatManager;
-        formatManager.registerBasicFormats();
-
-        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-
-        if (reader == nullptr)
-        {
-            std::cerr << "Could not create reader for: " << file.getFullPathName() << std::endl;
-            return nullptr;
-        }
-
-        auto buffer = std::make_unique<juce::AudioBuffer<float>>(
-            static_cast<int>(reader->numChannels),
-            static_cast<int>(reader->lengthInSamples)
-        );
-
-        reader->read(buffer.get(), 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
-
-        std::cout << "Loaded reference: " << reader->lengthInSamples << " samples, "
-                  << reader->numChannels << " channels" << std::endl;
-
-        return buffer;
-    }
-
-    bool compareAudio(const juce::AudioBuffer<float>& generated, const juce::AudioBuffer<float>& reference)
-    {
-        std::cout << "\nComparing audio..." << std::endl;
-
-        float genMaxLevel = generated.getMagnitude(0, generated.getNumSamples());
-        float refMaxLevel = reference.getMagnitude(0, reference.getNumSamples());
-
-        std::cout << "Generated max level: " << genMaxLevel << std::endl;
-        std::cout << "Reference max level: " << refMaxLevel << std::endl;
-
-        if (genMaxLevel < 0.01f)
-        {
-            std::cerr << "Generated audio is too quiet (possibly silence)" << std::endl;
-            return false;
-        }
-
-        float levelRatio = genMaxLevel / refMaxLevel;
-        if (levelRatio < 0.5f || levelRatio > 2.0f)
-        {
-            std::cerr << "Audio levels differ significantly! Ratio: " << levelRatio << std::endl;
-            return false;
-        }
-
-        int genSamples = generated.getNumSamples();
-        int refSamples = reference.getNumSamples();
-
-        if (genSamples != refSamples)
-        {
-            std::cerr << "Sample count mismatch! Generated: " << genSamples
-                      << ", Reference: " << refSamples << std::endl;
-            return false;
-        }
-
-        int genChannels = generated.getNumChannels();
-        int refChannels = reference.getNumChannels();
-
-        if (genChannels != refChannels)
-        {
-            std::cerr << "Channel count mismatch! Generated: " << genChannels
-                      << ", Reference: " << refChannels << std::endl;
-            return false;
-        }
-
-        double totalRmsDifference = 0.0;
-
-        for (int channel = 0; channel < genChannels; ++channel)
-        {
-            const float* genData = generated.getReadPointer(channel);
-            const float* refData = reference.getReadPointer(channel);
-
-            double sumSquaredDiff = 0.0;
-            float maxDiff = 0.0f;
-            int maxDiffSample = 0;
-
-            for (int i = 0; i < genSamples; ++i)
-            {
-                float diff = genData[i] - refData[i];
-                sumSquaredDiff += static_cast<double>(diff * diff);
-
-                if (std::abs(diff) > maxDiff)
-                {
-                    maxDiff = std::abs(diff);
-                    maxDiffSample = i;
-                }
-            }
-
-            double rms = std::sqrt(sumSquaredDiff / genSamples);
-            totalRmsDifference += rms;
-
-            std::cout << "Channel " << channel << ":" << std::endl;
-            std::cout << "  RMS difference: " << rms << std::endl;
-            std::cout << "  Max difference: " << maxDiff << " at sample " << maxDiffSample << std::endl;
-        }
-
-        double avgRmsDifference = totalRmsDifference / genChannels;
-        std::cout << "\nAverage RMS difference: " << avgRmsDifference << std::endl;
-        std::cout << "Threshold: " << MAX_RMS_DIFFERENCE << std::endl;
-
-        if (avgRmsDifference <= MAX_RMS_DIFFERENCE)
-        {
-            std::cout << "\nTest PASSED" << std::endl;
-            return true;
-        }
-        else
-        {
-            std::cerr << "\nTest FAILED - Audio output differs from reference!" << std::endl;
-            return false;
-        }
-    }
 };
 
 class PianoStressTest
@@ -770,32 +647,7 @@ public:
         std::cout << "Generated " << generatedAudio->getNumSamples() << " samples ("
                   << (generatedAudio->getNumSamples() / SAMPLE_RATE) << " seconds)" << std::endl;
 
-        juce::File referenceFile(referencePath + "/piano_stress_reference.wav");
-
-        if (!referenceFile.existsAsFile())
-        {
-            std::cout << "Reference file not found. Creating reference: " << referenceFile.getFullPathName() << std::endl;
-
-            if (!saveWavFile(referenceFile, *generatedAudio))
-            {
-                std::cerr << "Failed to save reference file" << std::endl;
-                return false;
-            }
-
-            std::cout << "Reference file created successfully." << std::endl;
-            std::cout << "Test PASSED (reference generated)" << std::endl;
-            return true;
-        }
-
-        std::cout << "Loading reference file: " << referenceFile.getFullPathName() << std::endl;
-        auto referenceAudio = loadWavFile(referenceFile);
-        if (referenceAudio == nullptr)
-        {
-            std::cerr << "Failed to load reference file" << std::endl;
-            return false;
-        }
-
-        return compareAudio(*generatedAudio, *referenceAudio);
+        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_stress_reference.wav"));
     }
 
 private:
@@ -1081,156 +933,6 @@ private:
             section++;
         }
     }
-
-    bool saveWavFile(const juce::File& file, const juce::AudioBuffer<float>& buffer)
-    {
-        file.getParentDirectory().createDirectory();
-
-        juce::WavAudioFormat wavFormat;
-        std::unique_ptr<juce::FileOutputStream> outputStream(file.createOutputStream());
-
-        if (outputStream == nullptr)
-        {
-            std::cerr << "Could not create output stream for: " << file.getFullPathName() << std::endl;
-            return false;
-        }
-
-        std::unique_ptr<juce::AudioFormatWriter> writer(
-            wavFormat.createWriterFor(
-                outputStream.get(),
-                SAMPLE_RATE,
-                static_cast<unsigned int>(buffer.getNumChannels()),
-                32,
-                {},
-                0
-            )
-        );
-
-        if (writer == nullptr)
-        {
-            std::cerr << "Could not create WAV writer" << std::endl;
-            return false;
-        }
-
-        outputStream.release();
-        return writer->writeFromAudioSampleBuffer(buffer, 0, buffer.getNumSamples());
-    }
-
-    std::unique_ptr<juce::AudioBuffer<float>> loadWavFile(const juce::File& file)
-    {
-        juce::AudioFormatManager formatManager;
-        formatManager.registerBasicFormats();
-
-        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-
-        if (reader == nullptr)
-        {
-            std::cerr << "Could not create reader for: " << file.getFullPathName() << std::endl;
-            return nullptr;
-        }
-
-        auto buffer = std::make_unique<juce::AudioBuffer<float>>(
-            static_cast<int>(reader->numChannels),
-            static_cast<int>(reader->lengthInSamples)
-        );
-
-        reader->read(buffer.get(), 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
-
-        std::cout << "Loaded reference: " << reader->lengthInSamples << " samples, "
-                  << reader->numChannels << " channels" << std::endl;
-
-        return buffer;
-    }
-
-    bool compareAudio(const juce::AudioBuffer<float>& generated, const juce::AudioBuffer<float>& reference)
-    {
-        std::cout << "\nComparing audio..." << std::endl;
-
-        float genMaxLevel = generated.getMagnitude(0, generated.getNumSamples());
-        float refMaxLevel = reference.getMagnitude(0, reference.getNumSamples());
-
-        std::cout << "Generated max level: " << genMaxLevel << std::endl;
-        std::cout << "Reference max level: " << refMaxLevel << std::endl;
-
-        if (genMaxLevel < 0.01f)
-        {
-            std::cerr << "Generated audio is too quiet (possibly silence)" << std::endl;
-            return false;
-        }
-
-        float levelRatio = genMaxLevel / refMaxLevel;
-        if (levelRatio < 0.5f || levelRatio > 2.0f)
-        {
-            std::cerr << "Audio levels differ significantly! Ratio: " << levelRatio << std::endl;
-            return false;
-        }
-
-        int genSamples = generated.getNumSamples();
-        int refSamples = reference.getNumSamples();
-
-        if (genSamples != refSamples)
-        {
-            std::cerr << "Sample count mismatch! Generated: " << genSamples
-                      << ", Reference: " << refSamples << std::endl;
-            return false;
-        }
-
-        int genChannels = generated.getNumChannels();
-        int refChannels = reference.getNumChannels();
-
-        if (genChannels != refChannels)
-        {
-            std::cerr << "Channel count mismatch! Generated: " << genChannels
-                      << ", Reference: " << refChannels << std::endl;
-            return false;
-        }
-
-        double totalRmsDifference = 0.0;
-
-        for (int channel = 0; channel < genChannels; ++channel)
-        {
-            const float* genData = generated.getReadPointer(channel);
-            const float* refData = reference.getReadPointer(channel);
-
-            double sumSquaredDiff = 0.0;
-            float maxDiff = 0.0f;
-            int maxDiffSample = 0;
-
-            for (int i = 0; i < genSamples; ++i)
-            {
-                float diff = genData[i] - refData[i];
-                sumSquaredDiff += static_cast<double>(diff * diff);
-
-                if (std::abs(diff) > maxDiff)
-                {
-                    maxDiff = std::abs(diff);
-                    maxDiffSample = i;
-                }
-            }
-
-            double rms = std::sqrt(sumSquaredDiff / genSamples);
-            totalRmsDifference += rms;
-
-            std::cout << "Channel " << channel << ":" << std::endl;
-            std::cout << "  RMS difference: " << rms << std::endl;
-            std::cout << "  Max difference: " << maxDiff << " at sample " << maxDiffSample << std::endl;
-        }
-
-        double avgRmsDifference = totalRmsDifference / genChannels;
-        std::cout << "\nAverage RMS difference: " << avgRmsDifference << std::endl;
-        std::cout << "Threshold: " << MAX_RMS_DIFFERENCE << std::endl;
-
-        if (avgRmsDifference <= MAX_RMS_DIFFERENCE)
-        {
-            std::cout << "\nTest PASSED" << std::endl;
-            return true;
-        }
-        else
-        {
-            std::cerr << "\nTest FAILED - Audio output differs from reference!" << std::endl;
-            return false;
-        }
-    }
 };
 
 // =============================================================================
@@ -1467,6 +1169,13 @@ private:
         for (int i = 0; i < 1000; i++)
         {
             output = resonator.go(0.0f);
+
+            if (! std::isfinite(output))
+            {
+                std::cerr << "    FAILED: DWGResonator produced NaN or Inf" << std::endl;
+                return false;
+            }
+
             maxOutput = std::max(maxOutput, std::abs(output));
 
             // Count zero crossings to verify oscillation
@@ -1640,6 +1349,13 @@ private:
         for (int i = 0; i < 100; i++)
         {
             float force = hammer.load(0.0f, 0.0f);
+
+            if (! std::isfinite(force))
+            {
+                std::cerr << "    FAILED: Hammer force is NaN or infinite" << std::endl;
+                return false;
+            }
+
             maxForce = std::max(maxForce, force);
         }
 
@@ -2270,7 +1986,8 @@ private:
 
         std::cout << "    Tail RMS ringing: " << ringing << ", after " << name << ": " << damped << std::endl;
 
-        if (ringing <= 0.0f || damped > 0.1f * ringing)
+        // Written so that NaN fails: every comparison with NaN is false
+        if (! (ringing > 0.0f && damped <= 0.1f * ringing))
         {
             std::cerr << "    FAILED: " << name << " didn't damp the held note" << std::endl;
             return false;
@@ -2405,12 +2122,17 @@ private:
         auto prepared = renderChord ({ { pVolume, 0.7f } }, true);
 
         float maxDiff = 0.0f;
+        bool finite = true;
+
         for (size_t i = 0; i < plain.size(); i++)
+        {
+            finite = finite && std::isfinite (plain[i]) && std::isfinite (prepared[i]);
             maxDiff = std::max (maxDiff, std::abs (plain[i] - prepared[i]));
+        }
 
         std::cout << "    Max difference: " << maxDiff << std::endl;
 
-        if (maxDiff > 1.0e-6f)
+        if (! finite || maxDiff > 1.0e-6f)
         {
             std::cerr << "    FAILED: prepareNotes() changed the output" << std::endl;
             return false;
@@ -2527,6 +2249,347 @@ private:
         }
 
         return out;
+    }
+};
+
+//==============================================================================
+// Processor tests: the host-facing code (PluginProcessor and SustainPedal),
+// driven through processBlock() as a host would
+//==============================================================================
+
+class PianoProcessorTest
+{
+public:
+    bool run()
+    {
+        std::cout << "\nPiano Processor Tests" << std::endl;
+        std::cout << "=====================" << std::endl;
+
+        bool allPassed = true;
+
+        allPassed &= testParameterMapping();
+        allPassed &= testLatencyAndBlockSizes();
+        allPassed &= testSustainPedal();
+
+        if (allPassed)
+            std::cout << "All processor tests PASSED" << std::endl;
+        else
+            std::cerr << "Some processor tests FAILED" << std::endl;
+
+        return allPassed;
+    }
+
+private:
+    struct Event
+    {
+        int sample;
+        juce::MidiMessage message;
+    };
+
+    static std::unique_ptr<PianoAudioProcessor> createProcessor (int maxBlockSize)
+    {
+        PianoAudioProcessor::launchCrashReporter = false;
+
+        auto proc = std::make_unique<PianoAudioProcessor>();
+        proc->setRateAndBufferSizeDetails (SAMPLE_RATE, maxBlockSize);
+        proc->prepareToPlay (SAMPLE_RATE, maxBlockSize);
+        return proc;
+    }
+
+    // Renders the left channel through processBlock(), cycling through blockSizes
+    static std::vector<float> renderProcessor (PianoAudioProcessor& proc, const std::vector<Event>& events,
+                                               const std::vector<int>& blockSizes, int numSamples)
+    {
+        std::vector<float> out;
+        out.reserve (size_t (numSamples));
+
+        juce::AudioBuffer<float> buffer;
+        juce::MidiBuffer midi;
+
+        int pos = 0;
+        for (size_t b = 0; pos < numSamples; b++)
+        {
+            int n = std::min (blockSizes[b % blockSizes.size()], numSamples - pos);
+            buffer.setSize (2, n, false, false, true);
+
+            midi.clear();
+            for (auto& e : events)
+                if (e.sample >= pos && e.sample < pos + n)
+                    midi.addEvent (e.message, e.sample - pos);
+
+            proc.processBlock (buffer, midi);
+
+            auto data = buffer.getReadPointer (0);
+            out.insert (out.end(), data, data + n);
+            pos += n;
+        }
+
+        return out;
+    }
+
+    static float rms (const std::vector<float>& x, float startSeconds, float endSeconds)
+    {
+        auto start = size_t (startSeconds * SAMPLE_RATE);
+        auto end   = std::min (x.size(), size_t (endSeconds * SAMPLE_RATE));
+
+        double sum = 0.0;
+        for (auto i = start; i < end; i++)
+            sum += double (x[i]) * x[i];
+
+        return float (std::sqrt (sum / double (std::max (end - start, size_t (1)))));
+    }
+
+    // Hosts address parameters by ID and position, and the engine by its enum.
+    // Hammer Position and the impedances used to drive the wrong engine slots.
+    bool testParameterMapping()
+    {
+        std::cout << "  Testing host parameter mapping..." << std::endl;
+
+        // Host order: changing it, or an ID, breaks saved sessions and automation
+        static const std::pair<const char*, int> hostParams[] = {
+            { "YoungsModulus", pYoungsModulus },
+            { "StringDensity", pStringDensity },
+            { "HammerMass", pHammerMass },
+            { "StringTension", pStringTension },
+            { "StringLength", pStringLength },
+            { "StringRadius", pStringRadius },
+            { "HammerCompliance", pHammerCompliance },
+            { "HammerSpringConstant", pHammerSpringConstant },
+            { "HammerHysteresis", pHammerHysteresis },
+            { "HammerPosition", pHammerPosition },
+            { "BridgeImpedance", pBridgeImpedance },
+            { "BridgeHorizontalImpedance", pBridgeHorizontalImpedance },
+            { "VerticalHorizontalImpedance", pVerticalHorizontalImpedance },
+            { "SoundboardSize", pSoundboardSize },
+            { "StringDecay", pStringDecay },
+            { "StringLopass", pStringLopass },
+            { "DampedStringDecay", pDampedStringDecay },
+            { "DampedStringLopass", pDampedStringLopass },
+            { "SoundboardDecay", pSoundboardDecay },
+            { "SoundboardLopass", pSoundboardLopass },
+            { "LongitudinalGamma", pLongitudinalGamma },
+            { "LongitudinalGammaQuadratic", pLongitudinalGammaQuadratic },
+            { "LongitudinalGammaDamped", pLongitudinalGammaDamped },
+            { "LongitudinalGammaQuadDamped", pLongitudinalGammaQuadraticDamped },
+            { "LongitudinalMix", pLongitudinalMix },
+            { "LongitudinalTransverseMix", pLongitudinalTransverseMix },
+            { "Volume", pVolume },
+            { "MaxVelocity", pMaxVelocity },
+            { "StringDetuning", pStringDetuning },
+            { "BridgeMass", pBridgeMass },
+            { "BridgeSpring", pBridgeSpring },
+            { "Dwgs4", pDwgs4 },
+            { "Downsample", pDownsample },
+            { "LongModes", pLongModes },
+        };
+
+        constexpr int blockSize = 64;
+        auto proc = createProcessor (blockSize);
+        auto params = proc->getPluginParameters();
+
+        if (params.size() != NumParams || int (std::size (hostParams)) != NumParams)
+        {
+            std::cerr << "    FAILED: " << params.size() << " host parameters, expected " << NumParams << std::endl;
+            return false;
+        }
+
+        std::vector<float> defaults;
+        for (int i = 0; i < NumParams; i++)
+            defaults.push_back (proc->params[i]->getValue());
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+
+        for (int h = 0; h < NumParams; h++)
+        {
+            auto [uid, index] = hostParams[h];
+
+            if (params[h]->getUid() != uid)
+            {
+                std::cerr << "    FAILED: host parameter " << h << " is " << params[h]->getUid()
+                          << ", expected " << uid << std::endl;
+                return false;
+            }
+
+            // Move just this one well away from its default
+            float value = defaults[size_t (index)] < 0.5f ? 1.0f : 0.0f;
+            params[h]->setValue (value);
+            proc->processBlock (buffer, midi);
+
+            for (int i = 0; i < NumParams; i++)
+            {
+                float expected = (i == index) ? value : defaults[size_t (i)];
+
+                if (proc->piano->getParameter (i) != expected)
+                {
+                    std::cerr << "    FAILED: setting " << uid << " left engine parameter " << i << " at "
+                              << proc->piano->getParameter (i) << ", expected " << expected << std::endl;
+                    return false;
+                }
+            }
+
+            params[h]->setValue (defaults[size_t (index)]);
+        }
+
+        proc->processBlock (buffer, midi);
+
+        std::cout << "    Host parameter mapping: PASSED" << std::endl;
+        return true;
+    }
+
+    // The engine renders 32-sample blocks behind a FIFO, which the processor
+    // reports as latency. Whatever the host's block sizes, the output must be
+    // the engine's own output delayed by exactly that latency.
+    bool testLatencyAndBlockSizes()
+    {
+        std::cout << "  Testing latency and host block sizes..." << std::endl;
+
+        constexpr int latency = PianoAudioProcessor::interalBlockSize;
+        constexpr int numSamples = latency * 700;
+
+        const std::vector<Event> events = {
+            { 5,     juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100) },
+            { 1000,  juce::MidiMessage::noteOn (1, 64, (juce::uint8) 80) },
+            { 5003,  juce::MidiMessage::noteOn (1, 67, (juce::uint8) 110) },
+            { 9000,  juce::MidiMessage::noteOff (1, 60) },
+            { 16001, juce::MidiMessage::allNotesOff (1) },
+        };
+
+        // The engine on its own, with the processor's default parameters and
+        // the same 32-sample blocks
+        std::vector<float> engine;
+        {
+            auto defaults = createProcessor (latency);
+
+            Piano piano;
+            piano.init (SAMPLE_RATE, latency);
+
+            for (int i = 0; i < NumParams; i++)
+                piano.setParameter (i, defaults->params[i]->getValue());
+
+            piano.prepareNotes();
+
+            std::vector<float> left (latency), right (latency);
+            float* channels[2] = { left.data(), right.data() };
+
+            for (int pos = 0; pos < numSamples; pos += latency)
+            {
+                juce::MidiBuffer midi;
+                for (auto& e : events)
+                    if (e.sample >= pos && e.sample < pos + latency)
+                        midi.addEvent (e.message, e.sample - pos);
+
+                piano.process (channels, latency, midi);
+                engine.insert (engine.end(), left.begin(), left.end());
+            }
+        }
+
+        if (! (rms (engine, 0.0f, 0.5f) > 1.0e-4f))
+        {
+            std::cerr << "    FAILED: the engine render is silent or not finite" << std::endl;
+            return false;
+        }
+
+        const std::vector<std::vector<int>> partitions = {
+            { 32 }, { 512 }, { 1 }, { 7 }, { 100, 3, 64, 17 },
+        };
+
+        for (auto& blockSizes : partitions)
+        {
+            juce::String name;
+            for (auto n : blockSizes)
+                name << (name.isEmpty() ? "" : ", ") << n;
+
+            auto proc = createProcessor (*std::max_element (blockSizes.begin(), blockSizes.end()));
+
+            if (proc->getLatencySamples() != latency)
+            {
+                std::cerr << "    FAILED: reported latency is " << proc->getLatencySamples()
+                          << ", expected " << latency << std::endl;
+                return false;
+            }
+
+            auto out = renderProcessor (*proc, events, blockSizes, numSamples);
+
+            float maxDiff = 0.0f;
+            bool finite = true;
+
+            for (size_t i = 0; i < out.size(); i++)
+            {
+                float expected = i < size_t (latency) ? 0.0f : engine[i - size_t (latency)];
+                finite = finite && std::isfinite (out[i]);
+                maxDiff = std::max (maxDiff, std::abs (out[i] - expected));
+            }
+
+            std::cout << "    Blocks of " << name << ": max difference " << maxDiff << std::endl;
+
+            if (! finite || maxDiff != 0.0f)
+            {
+                std::cerr << "    FAILED: blocks of " << name << " don't give the engine's output "
+                          << latency << " samples late" << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "    Latency and host block sizes: PASSED" << std::endl;
+        return true;
+    }
+
+    // CC64 holds note offs back until the pedal comes up. A key pressed again
+    // while the pedal is down cancels its held note off, and All Notes Off
+    // drops the held ones.
+    bool testSustainPedal()
+    {
+        std::cout << "  Testing sustain pedal..." << std::endl;
+
+        auto at = [] (float seconds) { return int (seconds * SAMPLE_RATE); };
+
+        auto noteOn    = juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100);
+        auto noteOff   = juce::MidiMessage::noteOff (1, 60);
+        auto pedalDown = juce::MidiMessage::controllerEvent (1, 64, 127);
+        auto pedalUp   = juce::MidiMessage::controllerEvent (1, 64, 0);
+
+        // RMS of 0.7 s - 1.2 s: half a second after the last thing that can damp the note
+        auto tail = [&] (std::vector<Event> events)
+        {
+            auto proc = createProcessor (BLOCK_SIZE);
+            auto out = renderProcessor (*proc, events, { BLOCK_SIZE }, at (1.2f));
+            return rms (out, 0.7f, 1.2f);
+        };
+
+        float released = tail ({ { 0, noteOn }, { at (0.1f), noteOff } });
+        float held     = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff } });
+        float pedalOff = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff }, { at (0.2f), pedalUp } });
+        float rekeyed  = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff },
+                                 { at (0.15f), noteOn }, { at (0.2f), pedalUp } });
+        float allOff   = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff },
+                                 { at (0.2f), juce::MidiMessage::allNotesOff (1) } });
+
+        std::cout << "    Tail RMS: released " << released << ", held by pedal " << held
+                  << ", pedal up " << pedalOff << ", key pressed again " << rekeyed
+                  << ", All Notes Off " << allOff << std::endl;
+
+        // Written so that NaN fails: every comparison with NaN is false
+        struct Check { const char* what; bool ok; };
+
+        const Check checks[] = {
+            { "the pedal didn't hold the note",                     held > 10.0f * released },
+            { "pedal up didn't release the note",                   pedalOff <= 0.1f * held },
+            { "pressing the key again didn't cancel its note off",  rekeyed > 10.0f * pedalOff },
+            { "All Notes Off didn't drop the held note off",        allOff <= 0.1f * held },
+        };
+
+        for (auto& c : checks)
+        {
+            if (! c.ok)
+            {
+                std::cerr << "    FAILED: " << c.what << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "    Sustain pedal: PASSED" << std::endl;
+        return true;
     }
 };
 
@@ -2684,6 +2747,18 @@ int runBenchmarks(const std::string& outputPath)
     return 0;
 }
 
+static void printUsage()
+{
+    std::cout << "Usage: PianoTests [reference-dir] [--group <name>]... [--update-references]\n"
+                 "       PianoTests --benchmark [output.json]\n"
+                 "       PianoTests --list\n\n"
+                 "  reference-dir         folder with the reference renders, tests/reference in the\n"
+                 "                        repository (default: reference/ in the current folder)\n"
+                 "  --group <name>        run only this test group, can be given more than once\n"
+                 "  --update-references   write the reference renders instead of comparing with them\n"
+                 "  --list                print the test group names" << std::endl;
+}
+
 int main(int argc, char* argv[])
 {
     // Check for benchmark mode
@@ -2700,6 +2775,88 @@ int main(int argc, char* argv[])
         }
     }
 
+    juce::String referenceDir;
+    juce::StringArray selectedGroups;
+    bool listGroups = false;
+
+    for (int i = 1; i < argc; i++)
+    {
+        juce::String arg (argv[i]);
+
+        if (arg == "--update-references")
+        {
+            g_updateReferences = true;
+        }
+        else if (arg == "--group" && i + 1 < argc)
+        {
+            selectedGroups.add (argv[++i]);
+        }
+        else if (arg == "--list")
+        {
+            listGroups = true;
+        }
+        else if (arg == "--help" || arg == "-h")
+        {
+            printUsage();
+            return 0;
+        }
+        else if (! arg.startsWith ("-") && referenceDir.isEmpty())
+        {
+            referenceDir = arg;
+        }
+        else
+        {
+            std::cerr << "Unknown argument: " << arg << std::endl;
+            printUsage();
+            return 2;
+        }
+    }
+
+    if (referenceDir.isEmpty())
+        referenceDir = juce::File::getCurrentWorkingDirectory().getFullPathName() + "/reference";
+
+    struct TestGroup
+    {
+        const char* name;
+        std::function<bool()> run;
+    };
+
+    const std::vector<TestGroup> groups = {
+        // Unit tests for internal classes
+        { "FilterUnitTest",      [] { return FilterUnitTest().run(); } },
+        { "HammerUnitTest",      [] { return HammerUnitTest().run(); } },
+        { "MSD2FilterUnitTest",  [] { return MSD2FilterUnitTest().run(); } },
+        { "ResampleFIRUnitTest", [] { return ResampleFIRUnitTest().run(); } },
+        { "DWGSUnitTest",        [] { return DWGSUnitTest().run(); } },
+        // Engine behaviour
+        { "PianoEdgeCaseTest",   [] { return PianoEdgeCaseTest().run(); } },
+        { "PianoMidiTest",       [] { return PianoMidiTest().run(); } },
+        { "PianoParameterTest",  [] { return PianoParameterTest().run(); } },
+        // The plugin's processor, as a host drives it
+        { "PianoProcessorTest",  [] { return PianoProcessorTest().run(); } },
+        // Renders compared with the references
+        { "PianoScaleTest",      [&] { return PianoScaleTest (referenceDir).run(); } },
+        { "PianoChordTest",      [&] { return PianoChordTest (referenceDir).run(); } },
+        { "PianoStressTest",     [&] { return PianoStressTest (referenceDir).run(); } },
+    };
+
+    if (listGroups)
+    {
+        for (auto& g : groups)
+            std::cout << g.name << std::endl;
+
+        return 0;
+    }
+
+    for (auto& name : selectedGroups)
+    {
+        if (std::none_of (groups.begin(), groups.end(), [&] (const TestGroup& g) { return name == g.name; }))
+        {
+            std::cerr << "Unknown test group: " << name << " (--list prints them)" << std::endl;
+            return 2;
+        }
+    }
+
     // Install signal handlers for crash detection
     installSignalHandlers();
 
@@ -2711,243 +2868,34 @@ int main(int argc, char* argv[])
     g_currentTestPhase = "JUCE initialization";
     juce::ScopedJuceInitialiser_GUI juceInit;
 
-    // Get reference directory from command line or use default
-    juce::String referenceDir;
-    if (argc > 1)
-    {
-        referenceDir = argv[1];
-    }
-    else
-    {
-        // Default to current directory
-        referenceDir = juce::File::getCurrentWorkingDirectory().getFullPathName() + "/reference";
-    }
-
     std::cout << "Reference directory: " << referenceDir << std::endl;
+
+    if (g_updateReferences)
+        std::cout << "Updating the reference renders instead of comparing with them" << std::endl;
+
     std::cout << std::endl;
 
-    bool allPassed = true;
     int testsRun = 0;
     int testsPassed = 0;
     int testsFailed = 0;
 
-    // Unit Tests for Internal Classes
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "UNIT TESTS" << std::endl;
-    std::cout << "========================================" << std::endl;
+    std::vector<const TestGroup*> toRun;
+    for (auto& g : groups)
+        if (selectedGroups.isEmpty() || selectedGroups.contains (g.name))
+            toRun.push_back (&g);
 
-    // Unit Test 1: Filter classes
+    for (auto g : toRun)
     {
-        g_currentTestName = "FilterUnitTest";
+        g_currentTestName = g->name;
         g_currentTestPhase = "running";
-        std::cout << "\n[Unit 1/8] Running Filter Unit Tests..." << std::endl;
+        std::cout << "\n[" << (testsRun + 1) << "/" << toRun.size() << "] Running " << g->name << "..." << std::endl;
 
-        FilterUnitTest test;
         testsRun++;
-        if (test.run())
-        {
+
+        if (g->run())
             testsPassed++;
-        }
         else
-        {
             testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Unit Test 2: Hammer class
-    {
-        g_currentTestName = "HammerUnitTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Unit 2/8] Running Hammer Unit Tests..." << std::endl;
-
-        HammerUnitTest test;
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Unit Test 3: MSD2Filter class
-    {
-        g_currentTestName = "MSD2FilterUnitTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Unit 3/8] Running MSD2Filter Unit Tests..." << std::endl;
-
-        MSD2FilterUnitTest test;
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Unit Test 4: ResampleFIR class
-    {
-        g_currentTestName = "ResampleFIRUnitTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Unit 4/8] Running ResampleFIR Unit Tests..." << std::endl;
-
-        ResampleFIRUnitTest test;
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Unit Test 5: DWGS class
-    {
-        g_currentTestName = "DWGSUnitTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Unit 5/8] Running DWGS Unit Tests..." << std::endl;
-
-        DWGSUnitTest test;
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Unit Test 6: Edge cases (extreme settings and sample rates)
-    {
-        g_currentTestName = "PianoEdgeCaseTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Unit 6/8] Running Edge Case Tests..." << std::endl;
-
-        PianoEdgeCaseTest test;
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Unit Test 7: MIDI handling
-    {
-        g_currentTestName = "PianoMidiTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Unit 7/8] Running MIDI Tests..." << std::endl;
-
-        PianoMidiTest test;
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Unit Test 8: Parameters that used to be ignored, and note preparation
-    {
-        g_currentTestName = "PianoParameterTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Unit 8/8] Running Parameter Tests..." << std::endl;
-
-        PianoParameterTest test;
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Integration Tests
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "INTEGRATION TESTS" << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    // Test 1: Scale Test
-    {
-        g_currentTestName = "PianoScaleTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Integration 1/3] Running Scale Test..." << std::endl;
-
-        PianoScaleTest test(referenceDir);
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Test 2: Chord Test
-    {
-        g_currentTestName = "PianoChordTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Integration 2/3] Running Chord Test..." << std::endl;
-
-        PianoChordTest test(referenceDir);
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
-    }
-
-    // Test 3: Stress Test (4 minutes of audio)
-    {
-        g_currentTestName = "PianoStressTest";
-        g_currentTestPhase = "running";
-        std::cout << "\n[Integration 3/3] Running Stress Test..." << std::endl;
-
-        PianoStressTest test(referenceDir);
-        testsRun++;
-        if (test.run())
-        {
-            testsPassed++;
-        }
-        else
-        {
-            testsFailed++;
-            allPassed = false;
-        }
     }
 
     // Summary
@@ -2962,7 +2910,7 @@ int main(int argc, char* argv[])
     std::cout << "Failed:  " << testsFailed << std::endl;
     std::cout << "========================================" << std::endl;
 
-    if (allPassed)
+    if (testsFailed == 0)
     {
         std::cout << "RESULT: ALL TESTS PASSED" << std::endl;
         return 0;

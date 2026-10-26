@@ -74,6 +74,9 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   and MIDI tests (All Notes Off / All Sound Off damp a held chord).
 - Parameter tests: Soundboard Size and Long Modes change the sound, and preparing notes
   ahead of time doesn't.
+- Processor tests run the plugin's own host-facing code, which the suite didn't build before.
+- A missing reference render now fails instead of being written as the new baseline, and
+  NaN can no longer slip through the comparisons.
 
 ## Building
 
@@ -165,12 +168,25 @@ Then run it with the reference renders folder as its argument, from the reposito
 build/tests/PianoTests_artefacts/Release/PianoTests tests/reference
 ```
 
-Without the argument it looks in `reference/` under the current folder, and if the
-references aren't there it writes new ones instead of comparing.
+Without the argument it looks in `reference/` under the current folder. A missing
+reference fails its test. To write new references after an intended change in the sound,
+run it with `--update-references`, listen to the results and commit them.
+
+`--group <name>` runs a single test group (`--list` prints them). CTest runs each group as
+its own test, and `ctest -L fast` skips the three renders compared with the references:
+
+```bash
+cd build
+ctest -C Release -L fast
+```
 
 ### Test Suite
 
 - **Unit Tests**: Filter, Hammer, MSD2Filter, ResampleFIR, DWGS (Digital Waveguide String) classes
+- **Engine Tests**: extreme settings and sample rates, MIDI handling, parameters
+- **Processor Tests**: the plugin's own `processBlock()`, driven as a host would: parameter
+  IDs, host order and engine mapping, latency and output across host block sizes, and the
+  sustain pedal
 - **Integration Tests**: Scale test, Chord test, 4-minute stress test, compared against
   reference renders in `tests/reference/`
 - **Edge Case Tests**: Upsampling limits and extreme parameter settings at several sample rates

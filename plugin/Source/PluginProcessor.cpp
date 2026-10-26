@@ -295,7 +295,8 @@ static gin::ProcessorOptions createProcessorOptions()
 PianoAudioProcessor::PianoAudioProcessor()
     : gin::Processor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo()), false, createProcessorOptions())
 {
-    launchCrashReporterOnce();
+    if (launchCrashReporter)
+        launchCrashReporterOnce();
 
 	setLatencySamples (interalBlockSize);
 	
