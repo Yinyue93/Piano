@@ -4,6 +4,7 @@
 #include "hammer.h"
 #include "dwgs.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -13,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <utility>
 #include <vector>
 
 // Current test tracking for crash reporting
@@ -1665,6 +1667,7 @@ public:
 
         allPassed &= testMSD2Creation();
         allPassed &= testMSD2Filtering();
+        allPassed &= testMSD2StaysPassive();
 
         if (allPassed)
             std::cout << "All MSD2Filter unit tests PASSED" << std::endl;
@@ -1724,6 +1727,43 @@ private:
         }
 
         std::cout << "    MSD2Filter filtering: PASSED" << std::endl;
+        return true;
+    }
+
+    // Middle C at the plugin defaults: Zb = 8000, ZbH = 60000, Zn = 3 Z. The
+    // Vertical Horizontal Impedance range reaches the coupling where the
+    // determinant is zero (about 21932) and goes far past it. The bridge must
+    // stay passive: it can't return more than 2 Z / Zn of what comes in.
+    bool testMSD2StaysPassive()
+    {
+        std::cout << "  Testing MSD2Filter coupling limit..." << std::endl;
+
+        const float Z = 4.9f, Zn = 3.0f * Z, R1 = 8000.0f, R2 = 60000.0f;
+        const float limit = 2.0f * Z / Zn;
+
+        for (float R12 : { 400.0f, 21931.7f, -21931.7f, 161371.5f })
+        {
+            MSD2Filter filter;
+            filter.create (44100.0f, 10.0f, 1e5f, R1, 10.0f, 1e5f, R2, R12, 0.0f, Zn, Z);
+
+            for (auto in : { std::array<float, 2> { 1.0f, 0.0f }, { 0.0f, 1.0f },
+                             { 0.7071f, 0.7071f }, { 0.7071f, -0.7071f } })
+            {
+                float out[2] = {};
+                filter.filter (in.data(), out);
+
+                float gain = std::sqrt (out[0] * out[0] + out[1] * out[1]);
+
+                if (! std::isfinite (gain) || gain > limit * 1.001f)
+                {
+                    std::cerr << "    FAILED: R12 = " << R12 << " gives gain " << gain
+                              << " (limit " << limit << ")" << std::endl;
+                    return false;
+                }
+            }
+        }
+
+        std::cout << "    MSD2Filter coupling limit: PASSED" << std::endl;
         return true;
     }
 };
@@ -2299,6 +2339,12 @@ public:
         allPassed &= testChangesSound ("Soundboard Size", pSoundboardSize, 0.0f, 1.0f);
         allPassed &= testChangesSound ("Long Modes", pLongModes, 0.0f, 1.0f);
         allPassed &= testPrepareNotesKeepsSound();
+        allPassed &= testSimdMatchesScalar ("default mixes", {});
+        allPassed &= testSimdMatchesScalar ("Longitudinal Transverse Mix off", { { pLongitudinalTransverseMix, 0.0f } });
+        allPassed &= testSimdMatchesScalar ("Longitudinal Mix off", { { pLongitudinalMix, 0.0f } });
+        allPassed &= testSimdMatchesScalar ("unequal mixes", { { pLongitudinalTransverseMix, 0.6f }, { pLongitudinalMix, 0.4f } });
+        allPassed &= testRendersSanely ("Vertical Horizontal Impedance at the old singularity", { { pVerticalHorizontalImpedance, 0.8337f } });
+        allPassed &= testRendersSanely ("Vertical Horizontal Impedance at maximum", { { pVerticalHorizontalImpedance, 1.0f } });
 
         if (allPassed)
             std::cout << "All parameter tests PASSED" << std::endl;
@@ -2315,8 +2361,8 @@ private:
     {
         std::cout << "  Testing " << name << "..." << std::endl;
 
-        auto renderA = renderChord (param, a, false);
-        auto renderB = renderChord (param, b, false);
+        auto renderA = renderChord ({ { param, a } }, false);
+        auto renderB = renderChord ({ { param, b } }, false);
 
         double diff = 0.0, ref = 0.0;
         float peak = 0.0f;
@@ -2355,8 +2401,8 @@ private:
     {
         std::cout << "  Testing prepareNotes()..." << std::endl;
 
-        auto plain    = renderChord (pVolume, 0.7f, false);
-        auto prepared = renderChord (pVolume, 0.7f, true);
+        auto plain    = renderChord ({ { pVolume, 0.7f } }, false);
+        auto prepared = renderChord ({ { pVolume, 0.7f } }, true);
 
         float maxDiff = 0.0f;
         for (size_t i = 0; i < plain.size(); i++)
@@ -2374,8 +2420,82 @@ private:
         return true;
     }
 
-    // Renders 1 s of a held chord with one parameter changed from 0.5
-    static std::vector<float> renderChord (int param, float value, bool prepare)
+    // The SIMD path (Dwgs4) takes over from the scalar one once the hammer has
+    // left the string. It used to apply Longitudinal Mix to both longitudinal
+    // forces, ignoring Longitudinal Transverse Mix. The two paths aren't bit
+    // identical (about 0.6% apart at the defaults), but the mix controls must
+    // act the same way in both. With the old bug unequal mixes were 4-20% apart.
+    bool testSimdMatchesScalar (const char* name, std::vector<std::pair<int, float>> changes)
+    {
+        std::cout << "  Testing SIMD against scalar, " << name << "..." << std::endl;
+
+        auto scalarChanges = changes;
+        scalarChanges.push_back ({ pDwgs4, 0.0f });
+        changes.push_back ({ pDwgs4, 1.0f });
+
+        auto scalar = renderChord (scalarChanges, false);
+        auto simd   = renderChord (changes, false);
+
+        double diff = 0.0, ref = 0.0;
+        bool finite = true;
+
+        for (size_t i = 0; i < scalar.size(); i++)
+        {
+            finite = finite && std::isfinite (scalar[i]) && std::isfinite (simd[i]);
+            diff += double (scalar[i] - simd[i]) * (scalar[i] - simd[i]);
+            ref  += double (scalar[i]) * scalar[i];
+        }
+
+        double relDiff = std::sqrt (diff / std::max (ref, 1e-20));
+        std::cout << "    Relative difference: " << relDiff << std::endl;
+
+        if (! finite || ref <= 0.0 || relDiff > 0.02)
+        {
+            std::cerr << "    FAILED: SIMD and scalar disagree with " << name << std::endl;
+            return false;
+        }
+
+        std::cout << "    SIMD against scalar, " << name << ": PASSED" << std::endl;
+        return true;
+    }
+
+    // Settings in the parameter range must render finite, bounded audio
+    bool testRendersSanely (const char* name, std::vector<std::pair<int, float>> changes)
+    {
+        std::cout << "  Testing " << name << "..." << std::endl;
+
+        for (float dwgs4 : { 0.0f, 1.0f })
+        {
+            auto c = changes;
+            c.push_back ({ pDwgs4, dwgs4 });
+            auto render = renderChord (c, false);
+
+            float peak = 0.0f;
+            double sum = 0.0;
+            bool finite = true;
+
+            for (auto x : render)
+            {
+                finite = finite && std::isfinite (x);
+                peak = std::max (peak, std::abs (x));
+                sum += double (x) * x;
+            }
+
+            std::cout << "    Dwgs4 " << dwgs4 << " peak: " << peak << std::endl;
+
+            if (! finite || peak > 4.0f || sum <= 0.0)
+            {
+                std::cerr << "    FAILED: " << name << " produced invalid output" << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "    " << name << ": PASSED" << std::endl;
+        return true;
+    }
+
+    // Renders 1 s of a held chord with some parameters changed from 0.5
+    static std::vector<float> renderChord (const std::vector<std::pair<int, float>>& changes, bool prepare)
     {
         Piano piano;
         piano.init (SAMPLE_RATE, BLOCK_SIZE);
@@ -2383,7 +2503,8 @@ private:
         for (int i = 0; i < NumParams; i++)
             piano.setParameter (i, 0.5f);
 
-        piano.setParameter (param, value);
+        for (auto [param, value] : changes)
+            piano.setParameter (param, value);
 
         if (prepare)
             piano.prepareNotes();

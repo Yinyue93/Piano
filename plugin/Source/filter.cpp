@@ -1,6 +1,7 @@
 #include "filter.h"
 #include "utils.h"
 #include "AudioFFT.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -388,6 +389,13 @@ void MSD2Filter::create(float Fs,
                         float m2, float k2, float R2,
                         float R12, float k12, float Zn, float Z)
 {
+    // The bridge is passive only while its impedance matrix is positive
+    // definite. Past R12^2 = R1 * R2 it would feed energy into the strings,
+    // and at det = 0 the coefficients blow up, which the Vertical Horizontal
+    // Impedance range can reach. Keep a margin below that limit.
+    float maxR12 = 0.99f * std::sqrt (R1 * R2);
+    R12 = std::clamp (R12, -maxR12, maxR12);
+
     float det = (R1 + Zn) * (R2 + Zn) - R12 * R12;
     f11 = 2.0f * Z * (R2 + Zn) / det;
     f12 = -2.0f * Z * R12 / det;

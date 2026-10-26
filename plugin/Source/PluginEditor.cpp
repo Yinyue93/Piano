@@ -36,9 +36,14 @@ PianoAudioProcessorEditor::PianoAudioProcessorEditor (PianoAudioProcessor& p_)
 
     for (auto pp : proc.getPluginParameters())
     {
-        // The engine derives tension from pitch, length and density, so this
-        // fader can't do anything. It stays a parameter so old sessions load.
-        if (pp->getUid() == "StringTension")
+        // These faders can't do anything: the engine derives tension from
+        // pitch, length and density, the bridge model only uses impedances,
+        // and the damper doesn't change the longitudinal losses. They stay
+        // parameters so old sessions load.
+        auto uid = pp->getUid();
+        if (uid == "StringTension"
+             || uid == "BridgeMass" || uid == "BridgeSpring"
+             || uid == "LongitudinalGammaDamped" || uid == "LongitudinalGammaQuadDamped")
             continue;
 
         auto pc = std::make_unique<PianoHorizontalFader> (pp, false);

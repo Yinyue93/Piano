@@ -54,6 +54,17 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
 - *String Tension* is hidden from the editor. The engine derives tension from the pitch,
   string length and density, so it can't be set on its own. It stays a plugin parameter so
   saved sessions still load.
+- *Bridge Mass*, *Bridge Spring*, *Longitudinal Gamma Damped* and *Longitudinal Gamma
+  Quadratic Damped* are hidden from the editor for the same reason: the bridge model only
+  uses the impedances, and the damper doesn't change the longitudinal losses. They stay
+  plugin parameters.
+- *Longitudinal Transverse Mix* now works with *Dwgs4* on. The SIMD path, which takes over
+  once the hammer leaves the string, applied *Longitudinal Mix* to both longitudinal forces.
+- *Vertical Horizontal Impedance* can no longer make the bridge unstable. Its upper range
+  could reach a coupling where the bridge equations divide by zero (around 0.83 at the
+  default settings) and blow up. The coupling is now kept just below
+  √(*Bridge Impedance* × *Bridge Horizontal Impedance*), the limit for a passive bridge, so
+  the top of the fader range has no further effect.
 
 **Editor**
 - The editor window can be resized and scales uniformly.

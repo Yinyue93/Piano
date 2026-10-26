@@ -305,11 +305,13 @@ vec4 PianoNote::go4()
     vec4 longForce = stringT[0]->tran2long4 (longDelay);
     //vec4 longForce = {0};
 
-    float longMix = v[pLongitudinalMix];
+    // Same mix as go(): each longitudinal force has its own gain
+    float longTranGain = longTranBridgeForce * v[pLongitudinalTransverseMix];
+    float longGain = longBridgeForce * v[pLongitudinalMix];
     auto s1 = simde_mm_add_ps (simde_mm_load_ps(tranForces + tTranRead), simde_mm_load_ps(tranForcesH + tTranRead));
-    auto s2 = simde_mm_add_ps (simde_mm_mul_ps (simde_mm_load_ps(longTranForces + tTranRead), simde_mm_broadcast_ss (&longTranBridgeForce)), simde_mm_mul_ps (longForce, simde_mm_broadcast_ss (&longBridgeForce)));
+    auto s2 = simde_mm_add_ps (simde_mm_mul_ps (simde_mm_load_ps(longTranForces + tTranRead), simde_mm_broadcast_ss (&longTranGain)), simde_mm_mul_ps (longForce, simde_mm_broadcast_ss (&longGain)));
 
-    vec4 output = simde_mm_add_ps (simde_mm_mul_ps (s1, simde_mm_broadcast_ss(&tranBridgeForce)), simde_mm_mul_ps (s2, simde_mm_broadcast_ss (&longMix)));
+    vec4 output = simde_mm_add_ps (simde_mm_mul_ps (s1, simde_mm_broadcast_ss(&tranBridgeForce)), s2);
 
     // The DC blocker is recursive, so it runs one sample at a time
     alignas(16) float o[4];
