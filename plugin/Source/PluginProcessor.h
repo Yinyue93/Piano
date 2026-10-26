@@ -45,7 +45,9 @@ public:
     // Tests turn this off.
     static inline bool launchCrashReporter = true;
 
-	constexpr static int interalBlockSize = 32;
+	// A 64-sample span lets each voice reuse its filter/string data in cache.
+	// The FIFO reports this latency to the host (1.33 ms at 48 kHz).
+	constexpr static int interalBlockSize = 64;
 
 	// The host's MIDI is copied to inputMidi and goes through the sustain pedal
 	// into sustainedMidi. The engine renders fixed blocks of interalBlockSize:

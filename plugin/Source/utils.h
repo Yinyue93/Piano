@@ -20,6 +20,28 @@
 #define vec4 simde__m128
 #define vec8 simde__m256
 
+// SIMDe's no-FMA fallback uses scalar lane expressions, which MSVC does not
+// reliably vectorize. On SSE targets without FMA, use explicit vector multiply
+// and add instructions with the same rounding and accumulation order. Keep
+// SIMDe's fused operations on targets that support them (including ARM).
+inline vec4 multiplyAdd4 (vec4 a, vec4 b, vec4 c)
+{
+#if defined(SIMDE_X86_SSE_NATIVE) && !defined(SIMDE_X86_FMA_NATIVE)
+    return simde_mm_add_ps (simde_mm_mul_ps (a, b), c);
+#else
+    return simde_mm_fmadd_ps (a, b, c);
+#endif
+}
+
+inline vec8 multiplyAdd8 (vec8 a, vec8 b, vec8 c)
+{
+#if defined(SIMDE_X86_SSE_NATIVE) && !defined(SIMDE_X86_FMA_NATIVE)
+    return simde_mm256_add_ps (simde_mm256_mul_ps (a, b), c);
+#else
+    return simde_mm256_fmadd_ps (a, b, c);
+#endif
+}
+
 #ifdef _WIN32
 #include <malloc.h>
 #define posix_memalign(p, a, s) (((*(p)) = _aligned_malloc((s), (a))), *(p) ? 0 :errno)

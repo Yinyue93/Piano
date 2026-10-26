@@ -220,7 +220,7 @@ vec4 Filter::filter4(vec4 in)
 
     while(b <= bend) {
         if(x >= xend) x = this->x;
-        out = simde_mm_fmadd_ps(simde_mm_broadcast_ss(b), simde_mm_loadu_ps(x), out);
+        out = multiplyAdd4(simde_mm_broadcast_ss(b), simde_mm_loadu_ps(x), out);
         b+=upsample;
         x+=upsample;
     }
@@ -233,7 +233,7 @@ vec4 Filter::filter4(vec4 in)
     while(a <= aend4)
     {
         if(y >= yend) y = this->y;
-        outa = simde_mm_fmadd_ps(simde_mm_broadcast_ss(a), simde_mm_loadu_ps(y), outa);
+        outa = multiplyAdd4(simde_mm_broadcast_ss(a), simde_mm_loadu_ps(y), outa);
         a+=upsample;
         y+=upsample;
     }
@@ -244,10 +244,10 @@ vec4 Filter::filter4(vec4 in)
     if(y < this->y) y += xskip;
     vec4 y4 = simde_mm_loadu_ps(y);
 
-    out = simde_mm_fmadd_ps (simde_mm_shuffle_ps (y4, y4, SIMDE_MM_SHUFFLE(0,3,2,1)), a0, out);
-    out = simde_mm_fmadd_ps (simde_mm_shuffle_ps (y4, out, SIMDE_MM_SHUFFLE(2,0,3,2)), a1, out);
-    out = simde_mm_fmadd_ps (simde_mm_shuffle_ps (y4, out, SIMDE_MM_SHUFFLE(1,1,0,3)), a2, out);
-    out = simde_mm_fmadd_ps (simde_mm_shuffle_ps (out, out, SIMDE_MM_SHUFFLE(0,0,0,0)), a3, out);
+    out = multiplyAdd4 (simde_mm_shuffle_ps (y4, y4, SIMDE_MM_SHUFFLE(0,3,2,1)), a0, out);
+    out = multiplyAdd4 (simde_mm_shuffle_ps (y4, out, SIMDE_MM_SHUFFLE(2,0,3,2)), a1, out);
+    out = multiplyAdd4 (simde_mm_shuffle_ps (y4, out, SIMDE_MM_SHUFFLE(1,1,0,3)), a2, out);
+    out = multiplyAdd4 (simde_mm_shuffle_ps (out, out, SIMDE_MM_SHUFFLE(0,0,0,0)), a3, out);
 
     simde_mm_store_ps(yc, out);
 
@@ -414,9 +414,7 @@ void MSD2Filter::create(float Fs,
 
 vec8 ResampleFIR::filter8(vec8 in)
 {
-    float *b = this->b;
-    float *x = this->xc - (ResampleFilterSize - 1);
-    if(x < this->x) x += xsize;
+    const auto writeIndex = xc - this->x;
 
     simde_mm256_store_ps(xc, in);
 
@@ -428,6 +426,22 @@ vec8 ResampleFIR::filter8(vec8 in)
     if (xc>=xend)
         xc = this->x;
 
+    // At 1x the kernel is a unit impulse, delayed by 32 samples. Keep the
+    // same history/cursor updates so clear() and later factor changes work,
+    // but avoid 64 multiply-adds for each group of eight output samples.
+    if (factor == 1)
+    {
+        auto delayedIndex = writeIndex - ResampleFilterSize / 2;
+        if (delayedIndex < 0)
+            delayedIndex += xsize;
+        return simde_mm256_loadu_ps (this->x + delayedIndex);
+    }
+
+    auto readIndex = writeIndex - (ResampleFilterSize - 1);
+    if (readIndex < 0)
+        readIndex += xsize;
+    float* x = this->x + readIndex;
+    float* b = this->b;
     vec8 out = {0};
 
     while (b <= bend)
@@ -435,7 +449,7 @@ vec8 ResampleFIR::filter8(vec8 in)
         if (x >= xend)
             x = this->x;
 
-        out = simde_mm256_fmadd_ps (simde_mm256_broadcast_ss (b), simde_mm256_loadu_ps (x), out);
+        out = multiplyAdd8 (simde_mm256_broadcast_ss (b), simde_mm256_loadu_ps (x), out);
         b++;
         x++;
     }
@@ -467,6 +481,15 @@ bool ResampleFIR::isCreated()
 // Lowpass at 1 / resample of Nyquist
 static void designResampleKernel(int resample, float* b)
 {
+    // The inverse FFT of a flat, unit spectrum, after the shift and reversal
+    // below. Spell it out so the exact delay kernel is backend-independent.
+    if (resample == 1)
+    {
+        std::fill_n (b, ResampleFilterSize, 0.0f);
+        b[ResampleFilterSize / 2 - 1] = 1.0f;
+        return;
+    }
+
     float f[ResampleFilterSize];
     float im[ResampleFilterSize];
     

@@ -9,7 +9,8 @@
 /** MIDI filter implementing a sustain pedal (CC64) for each MIDI channel.
     While a channel's pedal is down, its note offs are held back; they are
     emitted when that pedal is released, or by Reset All Controllers (CC121),
-    which lifts it.
+    which lifts it. All Notes Off (CC123) releases the keys but respects the
+    pedal; only All Sound Off (CC120) bypasses it and clears the held notes.
 
     The held note offs are a fixed table (one slot per channel and note), so
     nothing here allocates. */
@@ -21,7 +22,10 @@ public:
         pedalDown.fill (false);
 
         for (int channel = 0; channel < 16; channel++)
+        {
             clearHeld (channel);
+            keysDown[size_t (channel)].fill (false);
+        }
     }
 
     // Filters in into out, which is cleared first. out stays within
@@ -65,20 +69,43 @@ public:
                 releaseHeld (out, outCapacity, channel, pos);
                 BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
             }
-            else if (down && m.isNoteOff())
+            else if (m.isNoteOff())
             {
-                hold (channel, m.getNoteNumber(), m.getVelocity());
+                keysDown[size_t (channel)][size_t (m.getNoteNumber())] = false;
+                if (down)
+                    hold (channel, m.getNoteNumber(), m.getVelocity());
+                else
+                    BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
+            }
+            else if (m.isAllNotesOff())
+            {
+                // Equivalent to releasing every key on this channel. Notes
+                // already held by the pedal must keep their pending note off.
+                auto& keys = keysDown[size_t (channel)];
+                if (down)
+                {
+                    for (int note = 0; note < 128; note++)
+                        if (keys[size_t (note)])
+                            hold (channel, note, 0);
+                }
+                else
+                {
+                    BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
+                }
+                keys.fill (false);
             }
             else
             {
-                if (down && m.isNoteOn())
+                if (m.isNoteOn())
                 {
+                    keysDown[size_t (channel)][size_t (m.getNoteNumber())] = true;
                     // Key is held again, so drop any pending note off for it
                     unhold (channel, m.getNoteNumber());
                 }
-                else if (m.isAllNotesOff() || m.isAllSoundOff())
+                else if (m.isAllSoundOff())
                 {
                     clearHeld (channel);
+                    keysDown[size_t (channel)].fill (false);
                 }
 
                 BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
@@ -134,6 +161,7 @@ private:
     }
 
     std::array<bool, 16> pedalDown {};
+    std::array<std::array<bool, 128>, 16> keysDown {};
 
     // The held note off's velocity + 1 for each channel and note, 0 if none
     std::array<std::array<juce::uint8, 128>, 16> held {};

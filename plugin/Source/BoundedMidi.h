@@ -11,7 +11,7 @@
     When a buffer fills up, the events that stop sound win: anything else is
     dropped once the buffer is three quarters full, while note offs, sustain
     off, Reset All Controllers and All Notes / Sound Off can use the rest. If
-    even those don't fit, All Notes Off on every channel goes in their place,
+    even those don't fit, All Sound Off on every channel goes in their place,
     so no note is left ringing. Only a flood of thousands of events in one
     block gets that far.
 */
@@ -43,7 +43,7 @@ namespace BoundedMidi
     {
         const auto used     = buffer.data.size();
         const auto size     = eventSize (numBytes);
-        const auto reserve  = 16 * eventSize (3);   // room for the All Notes Offs
+        const auto reserve  = 16 * eventSize (3);   // room for the All Sound Offs
 
         if (! isRelease (data, numBytes))
         {
@@ -65,8 +65,9 @@ namespace BoundedMidi
         {
             for (int channel = 0; channel < 16; channel++)
             {
-                const juce::uint8 allNotesOff[] = { juce::uint8 (0xb0 | channel), 123, 0 };
-                buffer.addEvent (allNotesOff, 3, samplePosition);
+                // CC123 respects sustain; an overflow panic must bypass it.
+                const juce::uint8 allSoundOff[] = { juce::uint8 (0xb0 | channel), 120, 0 };
+                buffer.addEvent (allSoundOff, 3, samplePosition);
             }
         }
 

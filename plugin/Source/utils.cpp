@@ -20,6 +20,42 @@ float sum8(simde__m256 x) {
 }
 
 float sse_dot(int N, float* A, float* B) {
+#if SIMDE_NATURAL_VECTOR_SIZE_LE(128)
+    // Keep the eight four-lane accumulators in native-width registers. The
+    // emulated 256-bit path made unnecessary copies/reductions on SSE builds.
+    // The grouping and final reduction match the wide path exactly.
+
+    auto c0 = simde_mm_setzero_ps(), c1 = c0, c2 = c0, c3 = c0;
+    auto c4 = c0, c5 = c0, c6 = c0, c7 = c0;
+    int i = 0;
+    for (; N - i >= 32; i += 32) {
+        c0 = multiplyAdd4 (simde_mm_loadu_ps (A + i),      simde_mm_loadu_ps (B + i),      c0);
+        c1 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 4),  simde_mm_loadu_ps (B + i + 4),  c1);
+        c2 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 8),  simde_mm_loadu_ps (B + i + 8),  c2);
+        c3 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 12), simde_mm_loadu_ps (B + i + 12), c3);
+        c4 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 16), simde_mm_loadu_ps (B + i + 16), c4);
+        c5 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 20), simde_mm_loadu_ps (B + i + 20), c5);
+        c6 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 24), simde_mm_loadu_ps (B + i + 24), c6);
+        c7 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 28), simde_mm_loadu_ps (B + i + 28), c7);
+    }
+    for (; N - i >= 8; i += 8) {
+        c0 = multiplyAdd4 (simde_mm_loadu_ps (A + i),     simde_mm_loadu_ps (B + i),     c0);
+        c1 = multiplyAdd4 (simde_mm_loadu_ps (A + i + 4), simde_mm_loadu_ps (B + i + 4), c1);
+    }
+    float result = 0;
+    for (int tail = i; tail < N; ++tail)
+        result += A[tail] * B[tail];
+    if (i) {
+        auto lo = simde_mm_add_ps (c0, simde_mm_add_ps (c2, simde_mm_add_ps (c4, c6)));
+        auto hi = simde_mm_add_ps (c1, simde_mm_add_ps (c3, simde_mm_add_ps (c5, c7)));
+        auto p0 = simde_mm_add_ps (lo, simde_mm_shuffle_ps (lo, lo, SIMDE_MM_SHUFFLE (2, 3, 0, 1)));
+        auto p1 = simde_mm_add_ps (hi, simde_mm_shuffle_ps (hi, hi, SIMDE_MM_SHUFFLE (2, 3, 0, 1)));
+        auto p = simde_mm_add_ps (p0, p1);
+        result += simde_mm_cvtss_f32 (simde_mm_add_ss (p, simde_mm_shuffle_ps (p, p, SIMDE_MM_SHUFFLE (2, 2, 2, 2))));
+    }
+    return result;
+#else
+
     vec8 temp0 = {0};
     vec8 temp1 = {0};
     vec8 temp2 = {0};
@@ -43,17 +79,17 @@ float sse_dot(int N, float* A, float* B) {
         Bv1 = simde_mm256_loadu_ps(B + Bi + 8);
         Bv2 = simde_mm256_loadu_ps(B + Bi + 16);
         Bv3 = simde_mm256_loadu_ps(B + Bi + 24);
-        temp0 = simde_mm256_fmadd_ps(simde_mm256_loadu_ps(A + Ai), Bv0, temp0);
-        temp1 = simde_mm256_fmadd_ps(simde_mm256_loadu_ps(A + Ai + 8), Bv1, temp1);
-        temp2 = simde_mm256_fmadd_ps(simde_mm256_loadu_ps(A + Ai + 16), Bv2, temp2);
-        temp3 = simde_mm256_fmadd_ps(simde_mm256_loadu_ps(A + Ai + 24), Bv3, temp3);
+        temp0 = multiplyAdd8(simde_mm256_loadu_ps(A + Ai), Bv0, temp0);
+        temp1 = multiplyAdd8(simde_mm256_loadu_ps(A + Ai + 8), Bv1, temp1);
+        temp2 = multiplyAdd8(simde_mm256_loadu_ps(A + Ai + 16), Bv2, temp2);
+        temp3 = multiplyAdd8(simde_mm256_loadu_ps(A + Ai + 24), Bv3, temp3);
 
         Ai += 32;
         Bi += 32;
     }
 
     for(int i = 0; i < N8; i++) {
-        temp0 = simde_mm256_fmadd_ps(simde_mm256_loadu_ps(A + Ai), simde_mm256_loadu_ps(B + Bi), temp0);
+        temp0 = multiplyAdd8(simde_mm256_loadu_ps(A + Ai), simde_mm256_loadu_ps(B + Bi), temp0);
         Ai += 8;
         Bi += 8;
     }
@@ -70,6 +106,7 @@ float sse_dot(int N, float* A, float* B) {
     }
 
     return dotval;
+#endif
 }
 
 float sum4 (vec4 x)

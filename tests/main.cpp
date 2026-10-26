@@ -1571,6 +1571,7 @@ public:
 
         allPassed &= testResampleFIRCreation();
         allPassed &= testResampleFIRFiltering();
+        allPassed &= testResampleHistory();
 
         if (allPassed)
             std::cout << "All ResampleFIR unit tests PASSED" << std::endl;
@@ -1635,6 +1636,54 @@ private:
         std::cout << "    ResampleFIR filtering: PASSED" << std::endl;
         return true;
     }
+
+    bool testResampleHistory()
+    {
+        std::cout << "  Testing resampler delay, wrapping, clear and factor changes..." << std::endl;
+        ResampleFIR fir;
+        std::array<float, ResampleFilterSize> history {};
+        int cursor = 0, sample = 0;
+
+        for (int factor : { 1, 2, 1, 4, 1, 8, 3, 1 })
+        {
+            fir.create (factor);
+            if (factor == 1)
+                for (int i = 0; i < ResampleFilterSize; ++i)
+                    if (fir.b[i] != (i == ResampleFilterSize / 2 - 1 ? 1.0f : 0.0f))
+                        return false;
+
+            for (int block = 0; block < 96; ++block)
+            {
+                if (block == 41)
+                {
+                    fir.clear();
+                    history.fill (0.0f);
+                }
+
+                alignas(32) float in[8], expected[8], actual[8];
+                for (int lane = 0; lane < 8; ++lane)
+                {
+                    in[lane] = float ((sample++ * 17) % 101 - 50) * 0.01f;
+                    history[size_t (cursor)] = in[lane];
+                    cursor = (cursor + 1) % ResampleFilterSize;
+                    float sum = 0;
+                    for (int tap = 0; tap < ResampleFilterSize; ++tap)
+                        sum += fir.b[tap] * history[size_t ((cursor + tap) % ResampleFilterSize)];
+                    expected[lane] = sum;
+                }
+                simde_mm256_store_ps (actual, fir.filter8 (simde_mm256_load_ps (in)));
+                for (int lane = 0; lane < 8; ++lane)
+                    if (! std::isfinite (actual[lane])
+                        || std::abs (actual[lane] - expected[lane]) > 2e-6f * (1.0f + std::abs (expected[lane])))
+                    {
+                        std::cerr << "    FAILED: resampler at factor " << factor << ", block " << block << std::endl;
+                        return false;
+                    }
+            }
+        }
+        std::cout << "    Resampler history: PASSED" << std::endl;
+        return true;
+    }
 };
 
 class DWGSUnitTest
@@ -1652,6 +1701,7 @@ public:
         allPassed &= testDWGSStringSimulation();
         allPassed &= testDWGSDamper();
         allPassed &= testDWGSUpsampleCalculation();
+        allPassed &= testDotProducts();
 
         if (allPassed)
             std::cout << "All DWGS unit tests PASSED" << std::endl;
@@ -1662,6 +1712,39 @@ public:
     }
 
 private:
+    bool testDotProducts()
+    {
+        std::cout << "  Testing longitudinal dot products..." << std::endl;
+        std::array<float, 4104> a {}, b {};
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            a[i] = float (std::sin (double (i) * 0.113));
+            b[i] = float (std::cos (double (i) * 0.071));
+        }
+
+        // Unaligned inputs and lengths either side of each SIMD/tail boundary.
+        // A double-precision scalar sum is an independent numerical reference.
+        for (int offset = 0; offset < 8; ++offset)
+            for (int n : { 0, 1, 3, 4, 7, 8, 9, 15, 16, 31, 32, 33, 63, 64, 65, 255, 257, 4096 })
+            {
+                double expected = 0, magnitude = 0;
+                for (int i = 0; i < n; ++i)
+                {
+                    auto product = double (a[size_t (offset + i)]) * b[size_t (offset + i)];
+                    expected += product;
+                    magnitude += std::abs (product);
+                }
+                auto actual = sse_dot (n, a.data() + offset, b.data() + offset);
+                if (! std::isfinite (actual) || std::abs (actual - expected) > 2e-6 * (1.0 + magnitude))
+                {
+                    std::cerr << "    FAILED: dot product at length " << n << ", offset " << offset << std::endl;
+                    return false;
+                }
+            }
+        std::cout << "    Longitudinal dot products: PASSED" << std::endl;
+        return true;
+    }
+
     bool testDWGSCreation()
     {
         std::cout << "  Testing DWGS creation..." << std::endl;
@@ -2051,9 +2134,9 @@ public:
     }
 
 private:
-    // A held note (no note off) must be damped by the controller message.
-    // These used to be ignored, so notes held by the sustain pedal rang on
-    // after a panic: SustainPedal drops its pending note offs on these messages.
+    // Test the engine directly, without the pedal filter: All Notes Off must
+    // damp a held key, while All Sound Off must cut it. The processor tests
+    // separately verify that All Notes Off respects the sustain pedal.
     bool testAllOffDampsNotes (const char* name, const juce::MidiMessage& allOff)
     {
         std::cout << "  Testing " << name << "..." << std::endl;
@@ -3302,7 +3385,7 @@ private:
     }
 
     // The policy for full MIDI buffers: other events go first, note offs
-    // and All Off can use the rest, and when even that runs out All Notes Off
+    // and All Off can use the rest, and when even that runs out All Sound Off
     // on every channel takes their place. The buffer's storage never grows.
     bool testBoundedMidi()
     {
@@ -3328,13 +3411,13 @@ private:
             if (BoundedMidi::add (buffer, capacity, noteOff.getRawData(), noteOff.getRawDataSize(), i))
                 offsAdded++;
 
-        int allNotesOff = 0;
+        int allSoundOff = 0;
         for (const auto meta : buffer)
-            if (meta.getMessage().isAllNotesOff())
-                allNotesOff++;
+            if (meta.getMessage().isAllSoundOff())
+                allSoundOff++;
 
         std::cout << "    Capacity " << capacity << " bytes: " << onsAdded << " note ons, " << offsAdded
-                  << " note offs, " << allNotesOff << " All Notes Off" << std::endl;
+                  << " note offs, " << allSoundOff << " All Sound Off" << std::endl;
 
         if (onsAdded == 0 || onsAdded == 1000 || onsBytes > capacity * 3 / 4)
         {
@@ -3342,15 +3425,40 @@ private:
             return false;
         }
 
-        if (offsAdded == 0 || offsAdded == 1000 || allNotesOff != 16)
+        if (offsAdded == 0 || offsAdded == 1000 || allSoundOff != 16)
         {
-            std::cerr << "    FAILED: note offs didn't fill the rest, with All Notes Off on each channel at the end" << std::endl;
+            std::cerr << "    FAILED: note offs didn't fill the rest, with All Sound Off on each channel at the end" << std::endl;
             return false;
         }
 
         if (buffer.data.begin() != storage || buffer.data.size() > capacity)
         {
             std::cerr << "    FAILED: the buffer's storage grew" << std::endl;
+            return false;
+        }
+
+        // An overflow must still silence notes with the pedal down, and
+        // discard held note offs so they cannot leak into later playback.
+        SustainPedal pedal;
+        juce::MidiBuffer setup, filtered;
+        filtered.ensureSize (capacity);
+        setup.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
+        setup.addEvent (noteOn, 1);
+        setup.addEvent (noteOff, 2);
+        pedal.processMidi (setup, filtered, capacity);
+        pedal.processMidi (buffer, filtered, capacity);
+        std::array<bool, 16> silenced {};
+        for (const auto meta : filtered)
+            if (auto m = meta.getMessage(); m.isAllSoundOff())
+                silenced[size_t (m.getChannel() - 1)] = true;
+
+        setup.clear();
+        setup.addEvent (juce::MidiMessage::controllerEvent (1, 64, 0), 0);
+        pedal.processMidi (setup, filtered, capacity);
+        if (! std::all_of (silenced.begin(), silenced.end(), [] (bool x) { return x; })
+            || filtered.getNumEvents() != 1)
+        {
+            std::cerr << "    FAILED: overflow panic didn't bypass sustain or clear held notes" << std::endl;
             return false;
         }
 
@@ -3372,7 +3480,7 @@ private:
                 events.push_back ({ 0, juce::MidiMessage::noteOn (1, note, (juce::uint8) 100) });
 
             // Controllers fill the buffers with events to drop. Note offs for
-            // a single key fill them with releases, down to the All Notes Off.
+            // a single key fill them with releases, down to the All Sound Off.
             for (int i = 0; i < 8000; i++)
             {
                 if (controllers)
@@ -3601,6 +3709,7 @@ private:
 
         run ("All Notes Off and All Sound Off", prepared, [&] (juce::MidiBuffer& m)
         {
+            m.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
             m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
             m.addEvent (juce::MidiMessage::allNotesOff (1), 100);
             m.addEvent (juce::MidiMessage::allSoundOff (1), 200);
@@ -3652,8 +3761,8 @@ private:
     }
 
     // CC64 holds note offs back until the pedal comes up. A key pressed again
-    // while the pedal is down cancels its held note off, and All Notes Off
-    // drops the held ones.
+    // while the pedal is down cancels its held note off. All Notes Off releases
+    // the keys but must respect the pedal, even without individual note offs.
     bool testSustainPedal()
     {
         std::cout << "  Testing sustain pedal..." << std::endl;
@@ -3680,10 +3789,26 @@ private:
                                  { at (0.15f), noteOn }, { at (0.2f), pedalUp } });
         float allOff   = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff },
                                  { at (0.2f), juce::MidiMessage::allNotesOff (1) } });
+        float allOffUp = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff },
+                                 { at (0.15f), juce::MidiMessage::allNotesOff (1) }, { at (0.2f), pedalUp } });
+        float keysOff  = tail ({ { 0, noteOn }, { 100, pedalDown },
+                                 { at (0.1f), juce::MidiMessage::allNotesOff (1) } });
+        float keysUp   = tail ({ { 0, noteOn }, { 100, pedalDown },
+                                 { at (0.1f), juce::MidiMessage::allNotesOff (1) }, { at (0.2f), pedalUp } });
+        float keysRekeyed = tail ({ { 0, noteOn }, { 100, pedalDown },
+                                   { at (0.1f), juce::MidiMessage::allNotesOff (1) },
+                                   { at (0.15f), noteOn }, { at (0.2f), pedalUp } });
+        float otherOff = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff },
+                                 { at (0.2f), juce::MidiMessage::allNotesOff (2) } });
+        float soundOff = tail ({ { 0, noteOn }, { 100, pedalDown }, { at (0.1f), noteOff },
+                                 { at (0.2f), juce::MidiMessage::allSoundOff (1) } });
 
         std::cout << "    Tail RMS: released " << released << ", held by pedal " << held
                   << ", pedal up " << pedalOff << ", key pressed again " << rekeyed
-                  << ", All Notes Off " << allOff << std::endl;
+                  << ", All Notes Off " << allOff << ", followed by pedal up " << allOffUp
+                  << ", keys released by All Notes Off " << keysOff << ", followed by pedal up " << keysUp
+                  << ", rekeyed after All Notes Off " << keysRekeyed << ", other channel's All Notes Off " << otherOff
+                  << ", All Sound Off " << soundOff << std::endl;
 
         // Written so that NaN fails: every comparison with NaN is false
         struct Check { const char* what; bool ok; };
@@ -3692,7 +3817,13 @@ private:
             { "the pedal didn't hold the note",                     held > 10.0f * released },
             { "pedal up didn't release the note",                   pedalOff <= 0.1f * held },
             { "pressing the key again didn't cancel its note off",  rekeyed > 10.0f * pedalOff },
-            { "All Notes Off didn't drop the held note off",        allOff <= 0.1f * held },
+            { "All Notes Off overrode the sustain pedal",           allOff == held },
+            { "pedal up lost a note off after All Notes Off",        allOffUp == pedalOff },
+            { "All Notes Off didn't hold still-pressed keys",       keysOff == held },
+            { "pedal up didn't release keys from All Notes Off",    keysUp == pedalOff },
+            { "rekeying after All Notes Off lost the pressed key",  keysRekeyed == rekeyed },
+            { "another channel's All Notes Off lifted this pedal",  otherOff == held },
+            { "All Sound Off didn't bypass the pedal",              soundOff == 0.0f },
         };
 
         for (auto& c : checks)

@@ -798,25 +798,31 @@ Piano::~Piano()
 
 void Piano::process (float* out, int samples)
 {
-    for (int i = 0; i < samples; i++)
+    // Each voice is independent until mixing. Finish this MIDI-delimited
+    // span for one voice while its strings and filters are still in cache.
+    // Each output sample retains the original voice summation order.
+    std::fill_n (out, samples, 0.0f);
+    auto* v = voiceList;
+    if (v)
     {
-        PianoNote* v = voiceList;
-        float output = 0;
         do
         {
-            if (v)
-                output += v->goUp();
+            for (int i = 0; i < samples; ++i)
+                out[i] += v->goUp();
+            v = v->next;
+        } while (v && v != voiceList);
+    }
 
-        } while (v && (v=v->next) && (v != voiceList));
+    for (int i = 0; i < samples; ++i)
+    {
+        const float output = out[i];
 #ifdef FDN_REVERB
         out[i] = vals[pVolume] * soundboard->reverb(output);
 #else
-        out[i] =  vals[pVolume] * output;
-        input[size_t(i)] =  vals[pVolume] * output;
+        out[i] = vals[pVolume] * output;
+        input[size_t(i)] = vals[pVolume] * output;
 #endif
     }
-
-
 #ifndef FDN_REVERB
     soundboard->fft_conv(input.data(), out, samples);
 #endif
