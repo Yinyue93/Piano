@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "AudioFFT.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -463,9 +464,9 @@ bool ResampleFIR::isCreated()
     return bInit;
 }
 
-void ResampleFIR::create(int resample)
+// Lowpass at 1 / resample of Nyquist
+static void designResampleKernel(int resample, float* b)
 {
-    bInit = true;
     float f[ResampleFilterSize];
     float im[ResampleFilterSize];
     
@@ -495,4 +496,36 @@ void ResampleFIR::create(int resample)
         b[i] = b[ResampleFilterSize-1-i];
         b[ResampleFilterSize-1-i] = tmp;
     }
+}
+
+using ResampleKernels = std::array<std::array<float, ResampleFilterSize>, MaxFilterUpsample + 1>;
+
+static const ResampleKernels& resampleKernels()
+{
+    // Thread-safe, and worked out only once
+    static const ResampleKernels kernels = []
+    {
+        ResampleKernels k {};
+        for (int resample = 1; resample <= MaxFilterUpsample; resample++)
+            designResampleKernel(resample, k[size_t(resample)].data());
+        return k;
+    }();
+
+    return kernels;
+}
+
+void ResampleFIR::prepareKernels()
+{
+    resampleKernels();
+}
+
+void ResampleFIR::create(int resample)
+{
+    resample = std::clamp(resample, 1, MaxFilterUpsample);
+
+    bInit = true;
+    factor = resample;
+
+    const auto& kernel = resampleKernels()[size_t(resample)];
+    std::copy(kernel.begin(), kernel.end(), b);
 }

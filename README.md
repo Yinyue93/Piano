@@ -44,6 +44,10 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   starts audio, and held sustain note offs are a fixed table. SysEx is ignored without being
   copied. In a flood that fills the buffers, note offs and All Off are kept over everything
   else, and if even they don't fit, an All Notes Off takes their place.
+- MIDI channels play one shared piano, as several players would: a key sounds while any
+  channel holds it, so a note off on one channel no longer stops a key another channel
+  still holds. Each channel has its own sustain pedal, and All Notes Off, All Sound Off and
+  Reset All Controllers (which lifts the pedal) only affect their own channel.
 - Host blocks larger than the size the host announced no longer lose audio: the block is
   rendered a step at a time, so the output buffer stays small whatever the block size.
 - Note-ons no longer allocate memory: every note's buffers are prepared when the host
@@ -72,6 +76,12 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   √(*Bridge Impedance* × *Bridge Horizontal Impedance*), the limit for a passive bridge, so
   the top of the fader range has no further effect.
 
+- Changing *Downsample*, or a setting that changes how much a note is upsampled (such as
+  *String Length* or *Hammer Position*), now takes effect. Each note built its resampling
+  filters once, so after such a change it kept the old ones and sounded wrong until the
+  plugin was reloaded. The filters are now worked out once for every factor and a note
+  picks the right one on each strike.
+
 **Editor**
 - The editor window can be resized and scales uniformly.
 
@@ -82,7 +92,9 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   ahead of time doesn't.
 - Processor tests run the plugin's own host-facing code, which the suite didn't build before:
   host block sizes from 0 to 5000 samples, reset at every position in the engine block, All
-  Sound Off, MIDI floods, and no heap allocations in `processBlock()`.
+  Sound Off, MIDI floods, MIDI channels, and no heap allocations in `processBlock()`.
+- Changing *Downsample*, *Hammer Position* or *String Length* and then playing sounds
+  exactly like a fresh engine with those settings.
 - A missing reference render now fails instead of being written as the new baseline, and
   NaN can no longer slip through the comparisons.
 
@@ -194,14 +206,15 @@ ctest -C Release -L fast
 - **Engine Tests**: extreme settings and sample rates, MIDI handling, parameters
 - **Processor Tests**: the plugin's own `processBlock()`, driven as a host would: parameter
   IDs, host order and engine mapping, latency and output across host block sizes, the
-  sustain pedal, reset and All Sound Off, full MIDI buffers, and no allocations on the audio
+  sustain pedal, MIDI channels, reset and All Sound Off, full MIDI buffers, and no allocations on the audio
   thread
 - **Integration Tests**: Scale test, Chord test, 4-minute stress test, compared against
   reference renders in `tests/reference/`
 - **Edge Case Tests**: Upsampling limits and extreme parameter settings at several sample rates
 - **MIDI Tests**: All Notes Off damps, All Sound Off silences, and a note struck after
   All Sound Off doesn't bring back the old sound
-- **Parameter Tests**: Soundboard Size, Long Modes and note preparation
+- **Parameter Tests**: Soundboard Size, Long Modes, note preparation, and settings changed
+  after notes were played
 
 ## Known limitations
 

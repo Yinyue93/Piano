@@ -204,10 +204,22 @@ public:
     // init() and setParameter(), off the audio thread.
     void prepareNotes();
     void triggerOn (int note, float velocity, float *tune);
+    // Damps every sounding note, whichever channel played it
     void allNotesOff();
-    // Silences everything now (All Sound Off, the host's reset): voices stop
-    // without damping and the soundboard is cleared. Doesn't allocate.
+    // Silences everything now (the host's reset): voices stop without damping
+    // and the soundboard is cleared. Doesn't allocate.
     void reset();
+
+    // MIDI channels share the piano, as several players would share one: a
+    // key sounds while any channel holds it down, so a note off only stops a
+    // note once no other channel holds that key. Channels are 1 - 16.
+    void noteOn (int channel, int note, int velocity);
+    void noteOff (int channel, int note);
+    // Releases the keys this channel holds
+    void allNotesOff (int channel);
+    // Stops at once the notes only this channel was playing, and silences the
+    // soundboard too once nothing sounds
+    void allSoundOff (int channel);
 
     //vst crap
     void setParameter (int32_t index, float value);
@@ -220,6 +232,11 @@ protected:
     Value vals[NumParams];
     PianoNote* voiceList = nullptr;
     std::array<std::unique_ptr<PianoNote>, NUM_NOTES> noteArray;
+
+    // For each note, a bit per channel (bit 0 is channel 1): the channels
+    // holding its key down, and those whose strikes it's still sounding from
+    std::array<juce::uint16, NUM_NOTES> keysDown {};
+    std::array<juce::uint16, NUM_NOTES> soundingFrom {};
     int blockSize = 0;
     float Fs = 0.0f;
     std::vector<float> input;

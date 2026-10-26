@@ -377,6 +377,7 @@ void Piano::init (float Fs_, int blockSize_)
     blockSize = blockSize_;
     voiceList = nullptr;
     PianoNote::fillFrequencyTable();
+    ResampleFIR::prepareKernels();
 
     for (int k = PIANO_MIN_NOTE; k <= PIANO_MAX_NOTE; k++)
         noteArray[k] = std::make_unique<PianoNote>(k, int (Fs), this);
@@ -660,12 +661,23 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     outputdelay.clear();
     longHP.create (0.15f * downsample, 0.5f);
 
-    // XXX should only create once
-    // The filters' latency is skipped once, the first time the note renders.
-    // Later strikes leave the counters alone: they're already 0 once it has
-    // rendered, and still pending if prepareNotes() set the note up early.
-    if (! downSampleFilter.isCreated())
+    // The resampling filters depend on the up and downsampling factors, which
+    // Downsample, Hammer Position and the dispersion change. When they do,
+    // the note starts afresh, as if set up with these settings to begin with:
+    // its strings and filters hold sound at the old rate, so they're cleared,
+    // and the filters' latency is skipped again.
+    // The latency is skipped once, the first time the note renders. Strikes
+    // with the same factors leave the counters alone: they're already 0 once
+    // it has rendered, and still pending if prepareNotes() set the note up.
+    if (downSampleFilter.getFactor() != upsample || upSampleFilter.getFactor() != downsample)
     {
+        if (downSampleFilter.isCreated())
+        {
+            clearState();
+            tUp = 0;
+            tDown = 0;
+        }
+
         downSampleFilter.create(upsample);
         upSampleFilter.create(downsample);
         upSampleDelayNeeded = upSampleFilter.getDelay();
@@ -798,6 +810,7 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
         if (v && v->isDone())
         {
             v->deActivate();
+            soundingFrom[size_t (v->note)] = 0;
             remove[k++] = v;
         }
     } while (v && (v=v->next) && (v!=voiceList));
@@ -818,30 +831,16 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
         nextDelta = std::min (nextDelta, sampleFrames);
         process (outS, nextDelta - delta, delta);
 
-        // All Sound Off stops everything at once, All Notes Off releases the
-        // keys (the notes are damped as usual)
+        // All Sound Off stops the channel's notes at once, All Notes Off
+        // releases its keys (the notes are damped as usual)
         if (m.isAllSoundOff())
-        {
-            reset();
-        }
+            allSoundOff (m.getChannel());
         else if (allOff)
-        {
-            allNotesOff();
-        }
-        else if (m.getNoteNumber() >= PIANO_MIN_NOTE && m.getNoteNumber() <= PIANO_MAX_NOTE)
-        {
-            PianoNote* v = noteArray[size_t(m.getNoteNumber())].get();
-            if (m.isNoteOn())
-            {
-                float velocity = vals[pMaxVelocity] * pow ((float)(m.getVelocity() / 127.0f), 2.0f);
-                triggerOn (m.getNoteNumber(), velocity, nullptr);
-            }
-            else
-            {
-                if (v)
-                    v->triggerOff();
-            }
-        }
+            allNotesOff (m.getChannel());
+        else if (m.isNoteOn())
+            noteOn (m.getChannel(), m.getNoteNumber(), m.getVelocity());
+        else
+            noteOff (m.getChannel(), m.getNoteNumber());
 
         delta = nextDelta;
     }
@@ -862,6 +861,85 @@ void Piano::allNotesOff()
     } while (v && (v=v->next) && (v != voiceList));
 }
 
+void Piano::noteOn (int channel, int note, int velocity)
+{
+    if (channel < 1 || channel > 16 || note < PIANO_MIN_NOTE || note > PIANO_MAX_NOTE)
+        return;
+
+    auto bit = juce::uint16 (1 << (channel - 1));
+    keysDown[size_t (note)] |= bit;
+    soundingFrom[size_t (note)] |= bit;
+
+    float v = vals[pMaxVelocity] * pow ((float)(velocity / 127.0f), 2.0f);
+    triggerOn (note, v, nullptr);
+}
+
+void Piano::noteOff (int channel, int note)
+{
+    if (channel < 1 || channel > 16 || note < PIANO_MIN_NOTE || note > PIANO_MAX_NOTE)
+        return;
+
+    auto bit = juce::uint16 (1 << (channel - 1));
+    auto& down = keysDown[size_t (note)];
+
+    // Only the channel's own key: another channel may still hold this one
+    if ((down & bit) == 0)
+        return;
+
+    down &= juce::uint16 (~bit);
+
+    if (down == 0)
+        noteArray[size_t (note)]->triggerOff();
+}
+
+void Piano::allNotesOff (int channel)
+{
+    if (channel < 1 || channel > 16)
+        return;
+
+    for (int note = PIANO_MIN_NOTE; note <= PIANO_MAX_NOTE; note++)
+        noteOff (channel, note);
+}
+
+void Piano::allSoundOff (int channel)
+{
+    if (channel < 1 || channel > 16)
+        return;
+
+    auto bit = juce::uint16 (~(1 << (channel - 1)));
+
+    for (auto& down : keysDown)
+        down &= bit;
+
+    PianoNote* stop[NUM_NOTES];
+    int k = 0;
+
+    PianoNote* v = voiceList;
+    do
+    {
+        if (v)
+        {
+            auto& from = soundingFrom[size_t (v->note)];
+            from &= bit;
+
+            // Still sounding from another channel's strike: that one goes on
+            if (from == 0)
+                stop[k++] = v;
+        }
+    } while (v && (v=v->next) && (v != voiceList));
+
+    for (int j = 0; j < k; j++)
+    {
+        stop[j]->cut();
+        removeVoice (stop[j]);
+    }
+
+#ifdef FDN_REVERB
+    if (voiceList == nullptr && soundboard)
+        soundboard->clear();
+#endif
+}
+
 void Piano::reset()
 {
     while (voiceList)
@@ -870,6 +948,9 @@ void Piano::reset()
         v->cut();
         removeVoice (v);
     }
+
+    keysDown.fill (0);
+    soundingFrom.fill (0);
 
 #ifdef FDN_REVERB
     if (soundboard)

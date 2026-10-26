@@ -2245,6 +2245,9 @@ public:
         allPassed &= testSimdMatchesScalar ("unequal mixes", { { pLongitudinalTransverseMix, 0.6f }, { pLongitudinalMix, 0.4f } });
         allPassed &= testRendersSanely ("Vertical Horizontal Impedance at the old singularity", { { pVerticalHorizontalImpedance, 0.8337f } });
         allPassed &= testRendersSanely ("Vertical Horizontal Impedance at maximum", { { pVerticalHorizontalImpedance, 1.0f } });
+        allPassed &= testChangeMatchesFresh ("Downsample", { { pDownsample, 0.0f } }, { { pDownsample, 1.0f } });
+        allPassed &= testChangeMatchesFresh ("Hammer Position", { { pHammerPosition, 0.5f } }, { { pHammerPosition, 0.0f } });
+        allPassed &= testChangeMatchesFresh ("String Length", { { pStringLength, 0.25f } }, { { pStringLength, 0.0f } });
 
         if (allPassed)
             std::cout << "All parameter tests PASSED" << std::endl;
@@ -2364,6 +2367,90 @@ private:
         return true;
     }
 
+    // The resampling filters were made once per note, for the settings of the
+    // time, so changing a setting that changes the resampling (Downsample,
+    // Hammer Position, the dispersion) kept filters for the old rate. A note
+    // set up with one setting and struck after a change to another must sound
+    // exactly like one set up with the new setting, in both directions.
+    bool testChangeMatchesFresh (const char* name, std::vector<std::pair<int, float>> a, std::vector<std::pair<int, float>> b)
+    {
+        std::cout << "  Testing a change of " << name << "..." << std::endl;
+
+        for (float Fs : { 44100.0f, 22050.0f })
+        {
+            for (int direction = 0; direction < 2; direction++)
+            {
+                auto& from = direction == 0 ? a : b;
+                auto& to   = direction == 0 ? b : a;
+
+                auto fresh   = renderAfterChange (Fs, to, to);
+                auto changed = renderAfterChange (Fs, from, to);
+
+                float maxDiff = 0.0f;
+                double sum = 0.0;
+                bool finite = true;
+
+                for (size_t i = 0; i < fresh.size(); i++)
+                {
+                    finite = finite && std::isfinite (fresh[i]) && std::isfinite (changed[i]);
+                    maxDiff = std::max (maxDiff, std::abs (fresh[i] - changed[i]));
+                    sum += double (fresh[i]) * fresh[i];
+                }
+
+                std::cout << "    " << Fs << " Hz, " << (direction == 0 ? "there" : "and back")
+                          << ": max difference " << maxDiff << std::endl;
+
+                if (! finite || ! (sum > 0.0) || maxDiff != 0.0f)
+                {
+                    std::cerr << "    FAILED: after changing " << name << ", notes don't sound like ones set up with the new value" << std::endl;
+                    return false;
+                }
+            }
+        }
+
+        std::cout << "    Change of " << name << ": PASSED" << std::endl;
+        return true;
+    }
+
+    // Prepares every note with the settings in from, switches to to, then
+    // strikes notes across the keyboard
+    static std::vector<float> renderAfterChange (float Fs, const std::vector<std::pair<int, float>>& from,
+                                                 const std::vector<std::pair<int, float>>& to)
+    {
+        Piano piano;
+        piano.init (Fs, BLOCK_SIZE);
+
+        for (int i = 0; i < NumParams; i++)
+            piano.setParameter (i, 0.5f);
+
+        for (auto [param, value] : from)
+            piano.setParameter (param, value);
+
+        piano.prepareNotes();
+
+        for (auto [param, value] : to)
+            piano.setParameter (param, value);
+
+        std::vector<float> left (BLOCK_SIZE), right (BLOCK_SIZE), out;
+        float* channels[2] = { left.data(), right.data() };
+
+        int numBlocks = int (0.5f * Fs) / BLOCK_SIZE;
+
+        for (int b = 0; b < numBlocks; b++)
+        {
+            juce::MidiBuffer midi;
+
+            if (b == 0)
+                for (int note : { 24, 45, 60, 84, 105 })
+                    midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+
+            piano.process (channels, BLOCK_SIZE, midi);
+            out.insert (out.end(), left.begin(), left.end());
+        }
+
+        return out;
+    }
+
     // Settings in the parameter range must render finite, bounded audio
     bool testRendersSanely (const char* name, std::vector<std::pair<int, float>> changes)
     {
@@ -2453,6 +2540,7 @@ public:
         allPassed &= testParameterMapping();
         allPassed &= testLatencyAndBlockSizes();
         allPassed &= testSustainPedal();
+        allPassed &= testChannels();
         allPassed &= testAllSoundOff();
         allPassed &= testReset();
         allPassed &= testBoundedMidi();
@@ -2740,6 +2828,107 @@ private:
         return true;
     }
 
+    // MIDI channels share the piano: a key sounds while any channel holds it
+    // down or sustains it, each channel has its own sustain pedal, and All
+    // Notes Off, All Sound Off and Reset All Controllers only affect their
+    // own channel.
+    bool testChannels()
+    {
+        std::cout << "  Testing MIDI channels..." << std::endl;
+
+        auto at = [] (float seconds) { return int (seconds * SAMPLE_RATE); };
+        auto on    = [] (int ch, int note) { return juce::MidiMessage::noteOn (ch, note, (juce::uint8) 100); };
+        auto off   = [] (int ch, int note) { return juce::MidiMessage::noteOff (ch, note); };
+        auto pedal = [] (int ch, bool down) { return juce::MidiMessage::controllerEvent (ch, 64, down ? 127 : 0); };
+
+        auto render = [&] (std::vector<Event> events)
+        {
+            auto proc = createProcessor (BLOCK_SIZE);
+            return renderProcessor (*proc, events, { BLOCK_SIZE }, at (1.2f));
+        };
+
+        // RMS of 0.7 s - 1.2 s
+        auto tail = [&] (std::vector<Event> events) { return rms (render (events), 0.7f, 1.2f); };
+
+        float released = tail ({ { 0, on (1, 60) }, { at (0.1f), off (1, 60) } });
+        float held     = tail ({ { 0, on (1, 60) } });
+
+        // The same key from two channels: one letting go doesn't stop it
+        float shared     = tail ({ { 0, on (1, 60) }, { at (0.05f), on (2, 60) }, { at (0.1f), off (2, 60) } });
+        float bothOff    = tail ({ { 0, on (1, 60) }, { at (0.05f), on (2, 60) }, { at (0.1f), off (2, 60) }, { at (0.1f), off (1, 60) } });
+
+        // Pedals: channel 2's doesn't hold channel 1's notes, or lift channel 1's
+        // pedal (the note off comes after, so a shared pedal would let it through)
+        float otherPedal = tail ({ { 0, pedal (2, true) }, { 10, on (1, 60) }, { at (0.1f), off (1, 60) } });
+        float otherUp    = tail ({ { 0, pedal (1, true) }, { 10, on (1, 60) }, { at (0.05f), pedal (2, false) }, { at (0.1f), off (1, 60) } });
+        float otherReset = tail ({ { 0, pedal (1, true) }, { 10, on (1, 60) },
+                                   { at (0.05f), juce::MidiMessage::controllerEvent (2, 121, 0) }, { at (0.1f), off (1, 60) } });
+
+        // All Sound Off on channel 2 cuts only channel 2's note
+        float alone      = tail ({ { 0, on (1, 60) } });
+        float cutOther   = tail ({ { 0, on (1, 60) }, { 0, on (2, 64) }, { at (0.2f), juce::MidiMessage::allSoundOff (2) } });
+
+        std::cout << "    Tail RMS: held " << held << ", released " << released << ", held on one channel of two " << shared
+                  << ", released on both " << bothOff << ", other channel's pedal " << otherPedal << ", other pedal up "
+                  << otherUp << ", other channel's controller reset " << otherReset << ", alone " << alone
+                  << ", other channel's All Sound Off " << cutOther << std::endl;
+
+        // Same results by two routes must be the same exactly
+        auto same = [&] (std::vector<Event> a, std::vector<Event> b)
+        {
+            auto ra = render (a);
+            auto rb = render (b);
+            return ra == rb;
+        };
+
+        // All Notes Off on channel 2 is channel 2's note off, channel 1's note rings on
+        bool allNotesOff = same ({ { 0, on (1, 60) }, { 0, on (2, 64) }, { at (0.2f), juce::MidiMessage::allNotesOff (2) } },
+                                 { { 0, on (1, 60) }, { 0, on (2, 64) }, { at (0.2f), off (2, 64) } });
+
+        // Reset All Controllers lifts the channel's pedal
+        bool resetControllers = same ({ { 0, pedal (1, true) }, { 10, on (1, 60) }, { at (0.1f), off (1, 60) },
+                                        { at (0.2f), juce::MidiMessage::controllerEvent (1, 121, 0) } },
+                                      { { 0, pedal (1, true) }, { 10, on (1, 60) }, { at (0.1f), off (1, 60) },
+                                        { at (0.2f), pedal (1, false) } });
+
+        // All Sound Off on both channels is silence
+        auto both = render ({ { 0, on (1, 60) }, { 0, on (2, 64) },
+                              { at (0.2f), juce::MidiMessage::allSoundOff (1) }, { at (0.2f), juce::MidiMessage::allSoundOff (2) } });
+        bool silent = std::all_of (both.begin() + at (0.2f) + PianoAudioProcessor::interalBlockSize, both.end(),
+                                   [] (float x) { return x == 0.0f; });
+
+        // Written so that NaN fails: every comparison with NaN is false
+        struct Check { const char* what; bool ok; };
+
+        const Check checks[] = {
+            { "a note off on one channel stopped a key another channel holds", shared > 10.0f * released },
+            { "the key didn't stop once both channels let go",                 bothOff <= 0.1f * shared },
+            { "another channel's pedal held the note",                         otherPedal <= 0.1f * held },
+            { "another channel's pedal up lifted this one",                   otherUp > 10.0f * released },
+            { "another channel's Reset All Controllers lifted this pedal",    otherReset > 10.0f * released },
+            { "another channel's All Sound Off cut the note",                  cutOther > 0.5f * alone },
+            { "All Notes Off on one channel isn't that channel's note offs",   allNotesOff },
+            { "Reset All Controllers doesn't lift the pedal",                  resetControllers },
+            { "All Sound Off on every channel playing isn't silence",          silent },
+        };
+
+        bool allPassed = true;
+
+        for (auto& c : checks)
+        {
+            if (! c.ok)
+            {
+                std::cerr << "    FAILED: " << c.what << std::endl;
+                allPassed = false;
+            }
+        }
+
+        if (allPassed)
+            std::cout << "    MIDI channels: PASSED" << std::endl;
+
+        return allPassed;
+    }
+
     // All Sound Off stops everything at once: the output is silent from the
     // event on, plus the reported latency
     bool testAllSoundOff()
@@ -2839,8 +3028,8 @@ private:
     }
 
     // The policy for full MIDI buffers: other events go first, note offs
-    // and All Off can use the rest, and when even that runs out one All Notes
-    // Off takes their place. The buffer's storage never grows.
+    // and All Off can use the rest, and when even that runs out All Notes Off
+    // on every channel takes their place. The buffer's storage never grows.
     bool testBoundedMidi()
     {
         std::cout << "  Testing full MIDI buffers..." << std::endl;
@@ -2879,9 +3068,9 @@ private:
             return false;
         }
 
-        if (offsAdded == 0 || offsAdded == 1000 || allNotesOff != 1)
+        if (offsAdded == 0 || offsAdded == 1000 || allNotesOff != 16)
         {
-            std::cerr << "    FAILED: note offs didn't fill the rest, with one All Notes Off at the end" << std::endl;
+            std::cerr << "    FAILED: note offs didn't fill the rest, with All Notes Off on each channel at the end" << std::endl;
             return false;
         }
 

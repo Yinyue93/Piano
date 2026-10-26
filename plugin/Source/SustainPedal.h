@@ -6,8 +6,10 @@
 #include <array>
 
 //==============================================================================
-/** MIDI filter implementing a sustain pedal (CC64). While the pedal is down,
-    note offs are held back; they are emitted when the pedal is released.
+/** MIDI filter implementing a sustain pedal (CC64) for each MIDI channel.
+    While a channel's pedal is down, its note offs are held back; they are
+    emitted when that pedal is released, or by Reset All Controllers (CC121),
+    which lifts it.
 
     The held note offs are a fixed table (one slot per channel and note), so
     nothing here allocates. */
@@ -16,8 +18,10 @@ class SustainPedal
 public:
     void reset()
     {
-        pedalDown = false;
-        clearHeld();
+        pedalDown.fill (false);
+
+        for (int channel = 0; channel < 16; channel++)
+            clearHeld (channel);
     }
 
     // Filters in into out, which is cleared first. out stays within
@@ -41,31 +45,40 @@ public:
             auto m = meta.getMessage();
             auto channel = m.getChannel() - 1;
 
+            // System messages have no channel
+            if (channel < 0)
+            {
+                BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
+                continue;
+            }
+
+            auto& down = pedalDown[size_t (channel)];
+
             if (m.isSustainPedalOn())
             {
-                pedalDown = true;
+                down = true;
                 BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
             }
-            else if (m.isSustainPedalOff())
+            else if (m.isSustainPedalOff() || m.isControllerOfType (121))
             {
-                pedalDown = false;
-                releaseHeld (out, outCapacity, pos);
+                down = false;
+                releaseHeld (out, outCapacity, channel, pos);
                 BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
             }
-            else if (pedalDown && m.isNoteOff() && channel >= 0)
+            else if (down && m.isNoteOff())
             {
                 hold (channel, m.getNoteNumber(), m.getVelocity());
             }
             else
             {
-                if (pedalDown && m.isNoteOn() && channel >= 0)
+                if (down && m.isNoteOn())
                 {
                     // Key is held again, so drop any pending note off for it
                     unhold (channel, m.getNoteNumber());
                 }
                 else if (m.isAllNotesOff() || m.isAllSoundOff())
                 {
-                    clearHeld();
+                    clearHeld (channel);
                 }
 
                 BoundedMidi::add (out, outCapacity, meta.data, meta.numBytes, pos);
@@ -79,7 +92,7 @@ private:
         auto& slot = held[size_t (channel)][size_t (note)];
 
         if (slot == 0)
-            numHeld++;
+            numHeld[size_t (channel)]++;
 
         slot = juce::uint8 (velocity + 1);
     }
@@ -91,39 +104,38 @@ private:
         if (slot != 0)
         {
             slot = 0;
-            numHeld--;
+            numHeld[size_t (channel)]--;
         }
     }
 
-    void releaseHeld (juce::MidiBuffer& out, int capacity, int pos)
+    void releaseHeld (juce::MidiBuffer& out, int capacity, int channel, int pos)
     {
-        for (int channel = 0; channel < 16 && numHeld > 0; channel++)
+        if (numHeld[size_t (channel)] == 0)
+            return;
+
+        for (int note = 0; note < 128; note++)
         {
-            for (int note = 0; note < 128; note++)
+            if (auto slot = held[size_t (channel)][size_t (note)])
             {
-                if (auto slot = held[size_t (channel)][size_t (note)])
-                {
-                    const juce::uint8 noteOff[] = { juce::uint8 (0x80 | channel), juce::uint8 (note), juce::uint8 (slot - 1) };
-                    BoundedMidi::add (out, capacity, noteOff, 3, pos);
-                }
+                const juce::uint8 noteOff[] = { juce::uint8 (0x80 | channel), juce::uint8 (note), juce::uint8 (slot - 1) };
+                BoundedMidi::add (out, capacity, noteOff, 3, pos);
             }
         }
 
-        clearHeld();
+        clearHeld (channel);
     }
 
-    void clearHeld()
+    void clearHeld (int channel)
     {
-        if (numHeld > 0)
-            for (auto& channel : held)
-                channel.fill (0);
+        if (numHeld[size_t (channel)] > 0)
+            held[size_t (channel)].fill (0);
 
-        numHeld = 0;
+        numHeld[size_t (channel)] = 0;
     }
 
-    bool pedalDown = false;
+    std::array<bool, 16> pedalDown {};
 
     // The held note off's velocity + 1 for each channel and note, 0 if none
     std::array<std::array<juce::uint8, 128>, 16> held {};
-    int numHeld = 0;
+    std::array<int, 16> numHeld {};
 };

@@ -232,7 +232,13 @@ public:
     ResampleFIR();
     bool isCreated();
     int getDelay();
+    // Takes the coefficients for this factor (1 to MaxFilterUpsample) from a
+    // table, so it doesn't allocate
     void create(int resample);
+    int getFactor() const { return factor; }
+    // Works out the table. It uses an FFT, which allocates, so Piano::init()
+    // calls this before any note is set up.
+    static void prepareKernels();
     vec8 filter8(vec8 in);
     // Zeroes the input history, keeping the coefficients
     void clear() { memset (x, 0, sizeof (x)); }
@@ -243,6 +249,7 @@ public:
     float *bend;
     int xsize;
     bool bInit;
+    int factor = 0;
 };
 
 #endif
