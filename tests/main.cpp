@@ -159,11 +159,21 @@ constexpr float SILENCE_BETWEEN_NOTES = 0.1f;
 constexpr float VELOCITY = 0.8f;
 constexpr float TAIL_SECONDS = 2.0f;
 
-// Comparison threshold - maximum allowed RMS difference
-// Note: The Piano synth has some non-deterministic behavior in the reverb/soundboard,
-// so we use a relatively high threshold to allow for minor variations while still
+// Volume for the renders compared with the references. They used 0.7 (0.6
+// for the stress test), about five times the plugin's default, and peaked
+// at up to 5x full scale, so the files clipped when played. At 0.45 the
+// loudest (the chord test) peaks around 0.7.
+constexpr float REFERENCE_VOLUME = 0.45f;
+
+// Comparison threshold - maximum allowed RMS difference. It was 0.1 at the old
+// volumes; it's scaled with each test's change in level (Volume is
+// exponential: gain = exp (8 * value)), so the tests are as strict as before.
+// It allows for floating-point variation between platforms while still
 // catching major regressions (silence, crashes, significant audio changes).
-constexpr float MAX_RMS_DIFFERENCE = 0.1f;
+static float maxRmsDifference (float oldVolume)
+{
+    return 0.1f * std::exp (8.0f * (REFERENCE_VOLUME - oldVolume));
+}
 
 // Scale notes (C major scale from C4 to C5)
 const int SCALE_NOTES[] = { 60, 62, 64, 65, 67, 69, 71, 72 };
@@ -276,7 +286,7 @@ static std::unique_ptr<juce::AudioBuffer<float>> loadWavFile (const juce::File& 
     return buffer;
 }
 
-static bool compareAudio (const juce::AudioBuffer<float>& generated, const juce::AudioBuffer<float>& reference)
+static bool compareAudio (const juce::AudioBuffer<float>& generated, const juce::AudioBuffer<float>& reference, float threshold)
 {
     std::cout << "\nComparing audio..." << std::endl;
 
@@ -374,9 +384,9 @@ static bool compareAudio (const juce::AudioBuffer<float>& generated, const juce:
 
     double avgRmsDifference = totalRmsDifference / genChannels;
     std::cout << "\nAverage RMS difference: " << avgRmsDifference << std::endl;
-    std::cout << "Threshold: " << MAX_RMS_DIFFERENCE << std::endl;
+    std::cout << "Threshold: " << threshold << std::endl;
 
-    if (avgRmsDifference <= MAX_RMS_DIFFERENCE)
+    if (avgRmsDifference <= threshold)
     {
         std::cout << "\nTest PASSED" << std::endl;
         return true;
@@ -388,7 +398,7 @@ static bool compareAudio (const juce::AudioBuffer<float>& generated, const juce:
 
 // Compares a render with its reference, or rewrites the reference when run
 // with --update-references
-static bool checkAgainstReference (const juce::AudioBuffer<float>& generated, const juce::File& referenceFile)
+static bool checkAgainstReference (const juce::AudioBuffer<float>& generated, const juce::File& referenceFile, float threshold)
 {
     if (g_updateReferences)
     {
@@ -427,7 +437,7 @@ static bool checkAgainstReference (const juce::AudioBuffer<float>& generated, co
         return false;
     }
 
-    return compareAudio (generated, *referenceAudio);
+    return compareAudio (generated, *referenceAudio, threshold);
 }
 
 class PianoScaleTest
@@ -453,7 +463,7 @@ public:
 
         std::cout << "Generated " << generatedAudio->getNumSamples() << " samples" << std::endl;
 
-        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_scale_reference.wav"));
+        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_scale_reference.wav"), maxRmsDifference (0.7f));
     }
 
 private:
@@ -470,7 +480,7 @@ private:
             piano.setParameter(i, 0.5f);
         }
         // Set volume to a reasonable level
-        piano.setParameter(pVolume, 0.7f);
+        piano.setParameter(pVolume, REFERENCE_VOLUME);
         // The references were rendered when Soundboard Size had no effect,
         // which is the same as its plugin default of 0
         piano.setParameter(pSoundboardSize, 0.0f);
@@ -584,7 +594,7 @@ public:
 
         std::cout << "Generated " << generatedAudio->getNumSamples() << " samples" << std::endl;
 
-        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_chord_reference.wav"));
+        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_chord_reference.wav"), maxRmsDifference (0.7f));
     }
 
 private:
@@ -599,7 +609,7 @@ private:
         {
             piano.setParameter(i, 0.5f);
         }
-        piano.setParameter(pVolume, 0.7f);
+        piano.setParameter(pVolume, REFERENCE_VOLUME);
         // The references were rendered when Soundboard Size had no effect,
         // which is the same as its plugin default of 0
         piano.setParameter(pSoundboardSize, 0.0f);
@@ -711,7 +721,7 @@ public:
         std::cout << "Generated " << generatedAudio->getNumSamples() << " samples ("
                   << (generatedAudio->getNumSamples() / SAMPLE_RATE) << " seconds)" << std::endl;
 
-        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_stress_reference.wav"));
+        return checkAgainstReference (*generatedAudio, juce::File (referencePath + "/piano_stress_reference.wav"), maxRmsDifference (0.6f));
     }
 
 private:
@@ -745,7 +755,7 @@ private:
         {
             piano.setParameter(i, 0.5f);
         }
-        piano.setParameter(pVolume, 0.6f); // Slightly lower volume for stress test
+        piano.setParameter(pVolume, REFERENCE_VOLUME);
         // The references were rendered when Soundboard Size had no effect,
         // which is the same as its plugin default of 0
         piano.setParameter(pSoundboardSize, 0.0f);

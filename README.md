@@ -112,6 +112,10 @@ stability, real-time safety and usability fixes. See [Changes in this fork](#cha
   exactly like a fresh engine with those settings.
 - A missing reference render now fails instead of being written as the new baseline, and
   NaN can no longer slip through the comparisons.
+- The reference renders were made about five times louder than the plugin's default and
+  clipped (peaks up to 5x full scale), so they crackled when played. They're now rendered
+  at a level that stays below full scale, and the comparison thresholds were scaled with
+  the level so the tests are as strict as before.
 
 ## Building
 
