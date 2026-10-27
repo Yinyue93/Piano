@@ -3,6 +3,12 @@
 Changes made in this fork of [FigBug/Piano](https://github.com/FigBug/Piano). The upstream
 release history is in [Changelist.txt](Changelist.txt).
 
+**Keyboard shortcuts in the standalone app**
+- Ctrl+O (Cmd+O on macOS) opens the MIDI file browser, starting in the folder the
+  last MIDI file was loaded from. The MIDI menu's **Load File...** uses that folder too.
+- Spacebar plays the loaded MIDI file, or stops it and returns to the start, like
+  the Play and Stop buttons.
+
 **Seek in the MIDI player**
 - In the standalone app, clicking or dragging on the MIDI file display moves the
   playhead to that point, while playing or stopped.
