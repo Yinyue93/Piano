@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791389236132,
-  "repoUrl": "https://github.com/FigBug/Piano",
+  "lastUpdate": 1793077760553,
+  "repoUrl": "https://github.com/Yinyue93/Piano",
   "entries": {
     "Piano Performance (Windows)": [
       {
@@ -3785,6 +3785,50 @@ window.BENCHMARK_DATA = {
           {
             "name": "16 voices",
             "value": 17.4577,
+            "unit": "x realtime"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "committer": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "distinct": true,
+          "id": "c8afa8b57a27121825086656d29e249f41dffafe",
+          "message": "Run CI now that Actions are enabled on the fork\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-27T02:04:29-03:00",
+          "tree_id": "9a8e5bd8c580660d1bd848ea9f154af034e2515f",
+          "url": "https://github.com/Yinyue93/Piano/commit/c8afa8b57a27121825086656d29e249f41dffafe"
+        },
+        "date": 1793077757789,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "1 voice",
+            "value": 50.1884,
+            "unit": "x realtime"
+          },
+          {
+            "name": "4 voices",
+            "value": 23.0706,
+            "unit": "x realtime"
+          },
+          {
+            "name": "8 voices",
+            "value": 15.1767,
+            "unit": "x realtime"
+          },
+          {
+            "name": "16 voices",
+            "value": 9.6152,
             "unit": "x realtime"
           }
         ]
