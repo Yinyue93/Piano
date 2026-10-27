@@ -8,6 +8,8 @@ release history is in [Changelist.txt](Changelist.txt).
   last MIDI file was loaded from. The MIDI menu's **Load File...** uses that folder too.
 - Spacebar plays the loaded MIDI file, or stops it and returns to the start, like
   the Play and Stop buttons.
+- The loaded MIDI file's name is shown next to the export button; hover it for the
+  full path.
 
 **Seek in the MIDI player**
 - In the standalone app, clicking or dragging on the MIDI file display moves the
