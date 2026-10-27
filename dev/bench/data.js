@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793104930621,
+  "lastUpdate": 1793105089129,
   "repoUrl": "https://github.com/Yinyue93/Piano",
   "entries": {
     "Piano Performance (Windows)": [
@@ -1847,6 +1847,50 @@ window.BENCHMARK_DATA = {
           {
             "name": "16 voices",
             "value": 11.2336,
+            "unit": "x realtime"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "committer": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "distinct": true,
+          "id": "a87f09f936c934a9115ae3a060c2a5b6dfa43c62",
+          "message": "Show the loaded MIDI file's name in the standalone sidebar\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-27T09:37:08-03:00",
+          "tree_id": "ceffa1b7c16f205ba8158bfb539e28cd441842d3",
+          "url": "https://github.com/Yinyue93/Piano/commit/a87f09f936c934a9115ae3a060c2a5b6dfa43c62"
+        },
+        "date": 1793105085673,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "1 voice",
+            "value": 40.3665,
+            "unit": "x realtime"
+          },
+          {
+            "name": "4 voices",
+            "value": 19.301,
+            "unit": "x realtime"
+          },
+          {
+            "name": "8 voices",
+            "value": 13.2204,
+            "unit": "x realtime"
+          },
+          {
+            "name": "16 voices",
+            "value": 8.1809,
             "unit": "x realtime"
           }
         ]
