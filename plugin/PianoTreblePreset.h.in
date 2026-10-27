@@ -1,0 +1,5 @@
+#pragma once
+inline constexpr const char* pianoTreblePresetXml = R"preset(@TREBLE_PRESET_XML@)preset";
+inline constexpr const char* pianoModelPresetXml = R"preset(@MODEL_PRESET_XML@)preset";
+inline constexpr const char* pianoPhysicalPresetXml = R"preset(@PHYSICAL_PRESET_XML@)preset";
+inline constexpr const char* pianoRefined2PresetXml = R"preset(@REFINED2_PRESET_XML@)preset";

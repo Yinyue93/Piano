@@ -4,6 +4,9 @@ project(PianoTests VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64|x86|i.86")
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/plugin/Source/PianoPhysicalAvx.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+endif()
 
 # Create test executable using JUCE's console app function
 juce_add_console_app(PianoTests
@@ -14,6 +17,8 @@ juce_add_console_app(PianoTests
 target_sources(PianoTests PRIVATE
     main.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Source/qiano.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/Source/PianoPhysical.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/Source/PianoPhysicalAvx.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Source/dwgs.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Source/hammer.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Source/filter.cpp
@@ -32,6 +37,7 @@ target_sources(PianoTests PRIVATE
 target_include_directories(PianoTests PRIVATE
     ${CMAKE_SOURCE_DIR}/plugin/Source
     ${CMAKE_SOURCE_DIR}/modules/fmt/include
+    ${CMAKE_BINARY_DIR}/generated
 )
 
 target_link_libraries(PianoTests PRIVATE
@@ -118,3 +124,29 @@ endforeach()
 set_tests_properties(${FAST_TEST_GROUPS} PROPERTIES LABELS fast)
 set_tests_properties(${REFERENCE_TEST_GROUPS} PROPERTIES LABELS reference)
 set_tests_properties(PianoStressTest PROPERTIES LABELS "reference;slow")
+
+add_executable(PhysicalPianoTests PhysicalPianoTests.cpp ${CMAKE_SOURCE_DIR}/plugin/Source/PianoPhysical.cpp ${CMAKE_SOURCE_DIR}/plugin/Source/PianoPhysicalAvx.cpp)
+target_include_directories(PhysicalPianoTests PRIVATE ${CMAKE_SOURCE_DIR}/plugin/Source)
+add_test(NAME PhysicalPianoTests COMMAND PhysicalPianoTests)
+set_tests_properties(PhysicalPianoTests PROPERTIES LABELS "physical")
+
+# Render the production processor, using the exact plugin headers/definitions.
+# No experimental DSP or reference recordings are linked into this tool.
+add_executable(PianoAudition ${CMAKE_SOURCE_DIR}/tools/render-physical-grand.cpp)
+add_executable(TrebleAudit ${CMAKE_SOURCE_DIR}/tools/treble-audit.cpp)
+add_executable(RefinedTrebleAudition ${CMAKE_SOURCE_DIR}/tools/render-refined-treble.cpp)
+add_executable(BalancedTrebleAudition ${CMAKE_SOURCE_DIR}/tools/render-balanced-treble.cpp)
+foreach(tool PianoAudition TrebleAudit RefinedTrebleAudition BalancedTrebleAudition)
+    target_include_directories(${tool} PRIVATE ${CMAKE_SOURCE_DIR}/plugin/Source $<TARGET_PROPERTY:${PLUGIN_NAME},INCLUDE_DIRECTORIES>)
+    target_compile_definitions(${tool} PRIVATE $<TARGET_PROPERTY:${PLUGIN_NAME},COMPILE_DEFINITIONS>)
+    target_link_libraries(${tool} PRIVATE ${PLUGIN_NAME})
+endforeach()
+
+if(ENABLE_ASAN)
+    if(WIN32)
+        target_compile_options(PhysicalPianoTests PRIVATE /fsanitize=address)
+    else()
+        target_compile_options(PhysicalPianoTests PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(PhysicalPianoTests PRIVATE -fsanitize=address)
+    endif()
+endif()

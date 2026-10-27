@@ -3,8 +3,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <bit>
 #include "utils.h"
 #include "qiano.h"
+#include "PianoTrebleModel.h"
 
 #define HSTRING 1
 
@@ -107,11 +109,16 @@ float PianoNote::goUp()
 
     float out = goUpDelayed();
     measureEnergy (out);
-    if (piano->getVoicing() == PianoVoicing::warmDetail)
+    if (PianoVoicing::hasDetail (piano->getVoicing()))
     {
-        earlyGain += earlySmoothing * (0.45 + earlyTransient - earlyGain);
+        const bool fullTreble = PianoVoicing::hasFullTreble (piano->getVoicing());
+        const double floor = fullTreble ? treble.envelopeFloor() : 0.45;
+        earlyGain += earlySmoothing * (floor + earlyTransient - earlyGain);
         earlyTransient *= earlyStep;
         out *= float (earlyGain);
+        if (fullTreble) out = treble.process (out);
+        if (piano->getVoicing() == PianoVoicing::refinedTreble2)
+            out *= balancedTrebleGain;
     }
     return out;
 }
@@ -393,6 +400,9 @@ void Piano::init (float Fs_, int blockSize_)
     stereo.prepare (Fs);
     stereo.setWidth (vals[pStereoWidth]);
     stereo.clear();
+    physical.prepare (Fs);
+    physicalWidth.reset (Fs, 0.03);
+    physicalWidth.setCurrentAndTargetValue (vals[pStereoWidth]);
 
 #ifdef FDN_REVERB
     soundboard = std::make_unique<Reverb>(Fs);
@@ -432,6 +442,12 @@ PianoNote::PianoNote (int note_, int Fs_, Piano* piano_)
     note = note_;
     f = float (frequency (note));
     piano = piano_;
+    treble.prepare (note, Fs);
+    balancedTrebleGain = PianoTrebleModel::balancedOutputGain (note);
+
+    // These depend only on the sample rate, which is fixed for this note.
+    earlyStep = std::exp (-1.0 / (double (Fs) * 0.180));
+    earlySmoothing = 1.0 - std::exp (-1.0 / (double (Fs) * 0.004));
 
     if (note<31)
         nstrings = 1;
@@ -520,6 +536,9 @@ bool PianoNote::triggerOn (float velocity, float* tune)
 {
     //logf("note = %d velocity =  %g\n",note,velocity);
     Value *v = piano->vals;
+    const float modelWeight = PianoVoicing::hasRefinedModel (piano->getVoicing())
+                                ? PianoTrebleModel::weight (note) : 0.0f;
+    const float hammerStrings = 1.0f + (nstrings - 1.0f) * modelWeight;
 
     if (needsClear)
     {
@@ -540,6 +559,9 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     float m = 0.02f * pow (0.5f - log (f / 4192), 0.3f);
     m = 0.013f - 0.005f * log (f / f0) / log (4192 / f0);
     m *= v[pHammerMass];
+    m *= 1.0f - 0.20f * modelWeight;
+    if (piano->getVoicing() == PianoVoicing::refinedTreble2)
+        m *= PianoTrebleModel::balancedHammerMass (note);
     //m = .0092;
 
     //float K,p;
@@ -557,11 +579,15 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     //alpha = tau / (1 - eps);
     //alpha = 1e-6 * (148 + 1.83 * N - 5.5e-2 * N*N + 8.5e-4 * N*N*N);
     K *= v[pHammerSpringConstant];
+    K *= 1.0f - 0.25f * modelWeight;
     alpha *= v[pHammerHysteresis];
+    alpha *= 1.0f + 0.25f * modelWeight;
 
 
     float r = 0.008f * pow ((float)(3.0f + 1.5f * log (f / f0)), (float)-1.4f);
     r *= v[pStringRadius];
+    PianoTrebleModel::scale (note, f, v[pStringDensity], modelWeight,
+                            v[pStringRadius], v[pStringLength], r, L);
 
     float S = float (PI) * r * r;
     mu = S*v[pStringDensity];
@@ -589,10 +615,10 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     //float Zlong = sqrt(E*S*mu);
     float Zlong = sqrt(E*Score*mucore);
 
-    Z2i = 1.0f / (2 * Z);
+    Z2i = 1.0f / (2 * Z * hammerStrings);
     alphasb = (2 * Z) / (Z * nstrings + v[pBridgeImpedance]);
 
-    float Zb = v[pBridgeImpedance];
+    float Zb = v[pBridgeImpedance] * (1.0f + 0.50f * modelWeight);
     float hp = v[pHammerPosition];
     hp = hp / (1 + 0.01f * square (log (f / f0)));
     //hp = .0081/L;
@@ -605,7 +631,7 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     //logf("f = %g, r = %g mm, L = %g, T = %g, hpos = %g, hm = %g, Z = %g, K = %g, B = %g, Zb = %g, alpha = %g, p = %g, vTran=%g, vLong=%g, mBridge=%G, kBridge=%g\n",f,1000*r,L,T,hp,m,Z,K,B,Zb,alpha,p,vTran,vLong,mBridge,kBridge);
 
     float ZbH = v[pBridgeHorizontalImpedance];
-    float Zhv = v[pVerticalHorizontalImpedance];
+    float Zhv = v[pVerticalHorizontalImpedance] * (1.0f + 2.0f * modelWeight);
     float khv = kBridge * 0.0f;
 
     float ES = E*S;
@@ -691,9 +717,11 @@ bool PianoNote::triggerOn (float velocity, float* tune)
             fk = f*(1 + (TUNE[nstrings-1][k]-1) * v[pStringDetuning]);
         }
 
-        bool ok = stringT[k]->set(Fs,longmodes,downsample,upsample,fk,v[pStringDecay],v[pStringLopass],B,L,longFreq1,gammaL,gammaL2,hp,Z);
+        const float stringDecay = v[pStringDecay] * (1.0f - 0.20f * modelWeight);
+        const float stringLopass = v[pStringLopass] * (1.0f + 0.40f * modelWeight);
+        bool ok = stringT[k]->set(Fs,longmodes,downsample,upsample,fk,stringDecay,stringLopass,B,L,longFreq1,gammaL,gammaL2,hp,Z);
 #ifdef HSTRING
-        ok = ok && stringHT[k]->set(Fs,longmodes,downsample,upsample,fk,v[pStringDecay],v[pStringLopass],B,L,longFreq1,gammaL,gammaL2,hp,Z);
+        ok = ok && stringHT[k]->set(Fs,longmodes,downsample,upsample,fk,stringDecay,stringLopass,B,L,longFreq1,gammaL,gammaL2,hp,Z);
 #endif
         if (! ok)
         {
@@ -704,7 +732,7 @@ bool PianoNote::triggerOn (float velocity, float* tune)
         maxDel2 = std::max(stringT[k]->getDel2(), maxDel2);
     }
 
-    hammer->set(resample*Fs,m,K,p,Z,alpha,maxDel2+128);
+    hammer->set(resample*Fs,m,K,p,Z*hammerStrings,alpha,maxDel2+128);
     hammer->strike(velocity);
     resetEnergy();
 
@@ -713,9 +741,18 @@ bool PianoNote::triggerOn (float velocity, float* tune)
     longBridgeForce = Zlong*square(vLong/vTran) / L / (Fs * resample) * nstrings;
     longTranBridgeForce = 0.5f * Zlong * (vLong / vTran) / vTran;
 
-    tranBridgeForce /= resample;
+    // The decimator has unit gain: a velocity wave's physical bridge force
+    // must not lose 6 dB whenever its internal rate doubles. The interpolator
+    // inserts zeros, so retain its downsample-factor compensation. Earlier
+    // voicings keep their exact gain for saved-session compatibility.
+    if (piano->getVoicing() == PianoVoicing::refinedTreble2)
+        tranBridgeForce *= downsample;
+    else
+        tranBridgeForce /= resample;
     longBridgeForce /= resample;
+    longBridgeForce *= 1.0f - 0.65f * modelWeight;
     longTranBridgeForce /= resample;
+    longTranBridgeForce *= 1.0f - 0.65f * modelWeight;
 
     longHP.create (0.15f * downsample, 0.5f);
 
@@ -742,12 +779,11 @@ bool PianoNote::triggerOn (float velocity, float* tune)
         downSampleDelayNeeded = downSampleFilter.getDelay() / upsample;
     }
 
-    if (piano->getVoicing() == PianoVoicing::warmDetail)
+    if (PianoVoicing::hasDetail (piano->getVoicing()))
     {
-        earlyTransient = 0.55;
+        earlyTransient = PianoVoicing::hasFullTreble (piano->getVoicing())
+                             ? 1.0 - treble.envelopeFloor() : 0.55;
         if (! bActive) earlyGain = 1.0;
-        earlyStep = std::exp (-1.0 / (double (Fs) * 0.180));
-        earlySmoothing = 1.0 - std::exp (-1.0 / (double (Fs) * 0.004));
     }
     bActive = true;
 
@@ -758,6 +794,11 @@ bool PianoNote::triggerOn (float velocity, float* tune)
 
 void PianoNote::triggerOff()
 {
+    // This scale leaves F6-C8 undamped. Key release (including sustain-pedal
+    // release) cannot mute those strings; All Sound Off still uses cut().
+    if (piano->getVoicing() == PianoVoicing::refinedTreble2 && note >= 89)
+        return;
+
     Value *v = piano->vals;
     float gammaLDamped = v[pLongitudinalGammaDamped];
     float gammaL2Damped = v[pLongitudinalGammaQuadraticDamped];
@@ -766,6 +807,19 @@ void PianoNote::triggerOff()
 	{
         stringT[k]->damper (v[pDampedStringDecay],v[pDampedStringLopass],gammaLDamped,gammaL2Damped,128);
         stringHT[k]->damper (v[pDampedStringDecay],v[pDampedStringLopass],gammaLDamped,gammaL2Damped,128);
+    }
+}
+
+void PianoNote::setDamper (float amount)
+{
+    const auto* v=piano->vals;
+    amount=std::clamp(amount,0.0f,1.0f);
+    const float decay=std::exp((1-amount)*std::log(float(v[pStringDecay]))+amount*std::log(float(v[pDampedStringDecay])));
+    const float loss=std::exp((1-amount)*std::log(float(v[pStringLopass]))+amount*std::log(float(v[pDampedStringLopass])));
+    for(int k=0;k<nstrings;++k)
+    {
+        stringT[k]->damper(decay,loss,v[pLongitudinalGamma],v[pLongitudinalGammaQuadratic],128);
+        stringHT[k]->damper(decay,loss,v[pLongitudinalGamma],v[pLongitudinalGammaQuadratic],128);
     }
 }
 
@@ -802,6 +856,7 @@ void PianoNote::clearState()
 
     dcX1 = 0.0f;
     dcY1 = 0.0f;
+    treble.clear();
     earlyTransient = 0.55;
     earlyGain = 1.0;
     resetEnergy();
@@ -843,6 +898,18 @@ void Piano::process (float* out, int samples)
         } while (v && v != voiceList);
     }
 
+    if (voicingMode == PianoVoicing::physicalGrand)
+    {
+        for(int i=0;i<samples;++i)
+        {
+            // Match the waveguide force scale to the reduced bridge port;
+            // this keeps B3/C4 continuous across the two string solvers.
+            const auto frame=physical.process(.04f*out[i]);
+            out[i]=vals[pVolume]*.5f*(frame.left+frame.right);
+            side[size_t(i)]=vals[pVolume]*.5f*(frame.right-frame.left);
+        }
+        return;
+    }
     if (voicingMode != PianoVoicing::classic)
     {
         for (int i = 0; i < samples; ++i)
@@ -876,6 +943,16 @@ void Piano::process (float* out, int samples)
 void Piano::process (float** out, int samples, int offset)
 {
     process (out[0] + offset, samples);
+    if(voicingMode==PianoVoicing::physicalGrand)
+    {
+        physicalWidth.setTargetValue(vals[pStereoWidth]);
+        for(int i=0;i<samples;++i)
+        {
+            const float mid=out[0][offset+i],s=physicalWidth.getNextValue()*side[size_t(i)];
+            out[0][offset+i]=mid-s;out[1][offset+i]=mid+s;
+        }
+        return;
+    }
     stereo.setWidth (vals[pStereoWidth]);
     for (int i = 0; i < samples; ++i)
         stereo.process (out[0][offset + i], side[size_t (i)], out[0][offset + i], out[1][offset + i]);
@@ -914,13 +991,18 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
     for (int j = 0; j < k; j++)
         removeVoice (remove[j]);
 
+    if(voicingMode==PianoVoicing::physicalGrand)
+        for(int note=PianoPhysical::firstStruckNote;note<=PIANO_MAX_NOTE;++note)
+            if(keysDown[size_t(note)]==0 && !physical.isActive(note)) soundingFrom[size_t(note)]=0;
+
     for (auto meta : midi)
     {
         auto m = meta.getMessage();
 
         bool allOff = m.isAllNotesOff() || m.isAllSoundOff();
 
-        if (! m.isNoteOnOrOff() && ! allOff)
+        const bool physicalControl=voicingMode==PianoVoicing::physicalGrand && (m.isControllerOfType(64)||m.isControllerOfType(121));
+        if (! m.isNoteOnOrOff() && ! allOff && !physicalControl)
             continue;
 
         int nextDelta = int (m.getTimeStamp());
@@ -929,7 +1011,9 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
 
         // All Sound Off stops the channel's notes at once, All Notes Off
         // releases its keys (the notes are damped as usual)
-        if (m.isAllSoundOff())
+        if(physicalControl)
+            setPedal(m.getChannel(),m.isControllerOfType(121)?0.0f:m.getControllerValue()/127.0f);
+        else if (m.isAllSoundOff())
             allSoundOff (m.getChannel());
         else if (allOff)
             allNotesOff (m.getChannel());
@@ -946,7 +1030,7 @@ void Piano::process (float** outS, int sampleFrames, juce::MidiBuffer& midi)
 
 int Piano::getNumVoices() const
 {
-    int n = 0;
+    int n = voicingMode==PianoVoicing::physicalGrand?physical.activeNotes():0;
     PianoNote* v = voiceList;
 
     do
@@ -962,6 +1046,11 @@ int Piano::getNumVoices() const
 // Drops the dampers on every sounding note, for All Notes Off
 void Piano::allNotesOff()
 {
+    if(voicingMode==PianoVoicing::physicalGrand)
+    {
+        for(int channel=1;channel<=16;++channel) allNotesOff(channel);
+        return;
+    }
     PianoNote* v = voiceList;
 
     do
@@ -980,6 +1069,7 @@ void Piano::noteOn (int channel, int note, int velocity)
     auto bit = juce::uint16 (1 << (channel - 1));
     keysDown[size_t (note)] |= bit;
     soundingFrom[size_t (note)] |= bit;
+    if(voicingMode==PianoVoicing::physicalGrand) physical.setKey(note,true);
 
     float v = vals[pMaxVelocity] * pow ((float)(velocity / 127.0f), 2.0f);
     triggerOn (note, v, nullptr);
@@ -1000,7 +1090,15 @@ void Piano::noteOff (int channel, int note)
     down &= juce::uint16 (~bit);
 
     if (down == 0)
-        noteArray[size_t (note)]->triggerOff();
+    {
+        if(voicingMode==PianoVoicing::physicalGrand)
+        {
+            physical.setKey(note,false);
+            if(note<PianoPhysical::firstStruckNote)
+                noteArray[size_t(note)]->setDamper(float(std::pow(1-*std::max_element(physicalPedals.begin(),physicalPedals.end()),3)));
+        }
+        else noteArray[size_t (note)]->triggerOff();
+    }
 }
 
 void Piano::allNotesOff (int channel)
@@ -1021,6 +1119,17 @@ void Piano::allSoundOff (int channel)
 
     for (auto& down : keysDown)
         down &= bit;
+
+    if(voicingMode==PianoVoicing::physicalGrand)
+        for(int note=PIANO_MIN_NOTE;note<=PIANO_MAX_NOTE;++note)
+        {
+            physical.setKey(note,keysDown[size_t(note)]!=0);
+            if(note>=PianoPhysical::firstStruckNote)
+            {
+                soundingFrom[size_t(note)]&=bit;
+                if(soundingFrom[size_t(note)]==0) physical.silence(note);
+            }
+        }
 
     PianoNote* stop[NUM_NOTES];
     int k = 0;
@@ -1049,8 +1158,11 @@ void Piano::allSoundOff (int channel)
     if (voiceList == nullptr && soundboard)
         soundboard->clear();
 #endif
-    if (voiceList == nullptr)
+    if (voiceList == nullptr && (voicingMode!=PianoVoicing::physicalGrand ||
+        std::none_of(soundingFrom.begin(),soundingFrom.end(),[](auto channels){return channels!=0;})))
     {
+        physical.reset();
+        physical.setPedal(*std::max_element(physicalPedals.begin(),physicalPedals.end()));
         voicing.clear();
         sideVoicing.clear();
         stereo.clear();
@@ -1062,7 +1174,7 @@ void Piano::allSoundOff (int channel)
 
 void Piano::setVoicing (int mode)
 {
-    mode = std::clamp (mode, int (PianoVoicing::classic), int (PianoVoicing::warmDetail));
+    mode = std::clamp (mode, int (PianoVoicing::classic), int (PianoVoicing::refinedTreble2));
     if (mode != voicingMode)
     {
         reset();
@@ -1081,6 +1193,8 @@ void Piano::reset()
 
     keysDown.fill (0);
     soundingFrom.fill (0);
+    physicalPedals.fill(0);
+    physical.reset();
     voicing.clear();
     sideVoicing.clear();
     stereo.clear();
@@ -1095,6 +1209,12 @@ void Piano::reset()
 
 void Piano::triggerOn (int note, float velocity, float* tune)
 {
+    if(voicingMode==PianoVoicing::physicalGrand && note>=PianoPhysical::firstStruckNote)
+    {
+        physical.setParameters(physicalParameters());
+        physical.strike(note,velocity);
+        return;
+    }
     PianoNote* v = noteArray[size_t(note)].get();
     if (v == nullptr)
         return;
@@ -1112,10 +1232,48 @@ void Piano::triggerOn (int note, float velocity, float* tune)
     }
 }
 
+PianoPhysical::Parameters Piano::physicalParameters() const
+{
+    PianoPhysical::Parameters p;
+    p.young=vals[pYoungsModulus].v*1e9;p.density=vals[pStringDensity].v;
+    p.length=vals[pStringLength].v;p.radius=vals[pStringRadius].v;p.mass=vals[pHammerMass].v;
+    p.stiffness=vals[pHammerSpringConstant].v;p.exponent=vals[pHammerCompliance].v;p.hysteresis=vals[pHammerHysteresis].v;
+    p.position=vals[pHammerPosition].v;p.decay=vals[pStringDecay].v;p.loss=vals[pStringLopass].v;p.detune=vals[pStringDetuning].v;
+    p.bridge=vals[pBridgeImpedance].v;p.horizontal=vals[pBridgeHorizontalImpedance].v;p.coupling=vals[pVerticalHorizontalImpedance].v;
+    return p;
+}
+
+void Piano::setPedal(int channel,float position)
+{
+    if(channel<1 || channel>16) return;
+    physicalPedals[size_t(channel-1)]=std::clamp(position,0.0f,1.0f);
+    updatePhysicalPedal();
+}
+
+void Piano::updatePhysicalPedal()
+{
+    const float position=*std::max_element(physicalPedals.begin(),physicalPedals.end());
+    physical.setPedal(position);
+    auto* voice=voiceList;
+    if(voice) do
+    {
+        if(keysDown[size_t(voice->note)]==0) voice->setDamper(float(std::pow(1-position,3)));
+        voice=voice->next;
+    } while(voice && voice!=voiceList);
+}
+
 //-----------------------------------------------------------------------------------------
 void Piano::setParameter (int32_t index, float value)
 {
     Value &p = vals[index];
+    // The processor sends every parameter each callback. Map only changes,
+    // but always map the first value (including zero). Compare bits so signed
+    // zero retains the same mapping and reported value as an uncached update.
+    if (parameterInitialised[size_t (index)]
+        && std::bit_cast<uint32_t> (p.f) == std::bit_cast<uint32_t> (value))
+        return;
+
+    parameterInitialised[size_t (index)] = true;
     p.f = value;
 
     switch (index)

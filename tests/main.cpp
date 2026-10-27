@@ -6,6 +6,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "../modules/gin/modules/gin_standaloneplugin/standaloneplugin/gin_sidebarlayout.h"
+#include "../modules/gin/modules/gin_standaloneplugin/standaloneplugin/gin_midifileexporter.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -2332,6 +2333,7 @@ public:
 
         bool allPassed = true;
 
+        allPassed &= testParameterUpdates();
         allPassed &= testChangesSound ("Soundboard Size", pSoundboardSize, 0.0f, 1.0f);
         allPassed &= testChangesSound ("Long Modes", pLongModes, 0.0f, 1.0f);
         allPassed &= testPrepareNotesKeepsSound();
@@ -2354,6 +2356,69 @@ public:
     }
 
 private:
+    bool testParameterUpdates()
+    {
+        std::cout << "  Testing initial, repeated and changed parameter values..." << std::endl;
+        struct Probe : Piano
+        {
+            float mapped (int index) const { return vals[index].v; }
+            bool boardDirty() const { return soundboardDirty; }
+            void acknowledgeBoard() { soundboardDirty = false; }
+        };
+        Probe cached, changed;
+        const auto sameBits = [] (float a, float b) { return std::memcmp (&a, &b, sizeof (a)) == 0; };
+
+        for (int index = 0; index < NumParams; ++index)
+        {
+            // A first normalized zero must be mapped, even though the stored
+            // normalized value already defaults to zero.
+            for (float value : { 0.0f, 0.25f, 1.0f, 0.75f, 0.0f })
+            {
+                cached.setParameter (index, value);
+                for (int repeat = 0; repeat < 4; ++repeat)
+                {
+                    cached.setParameter (index, value);
+                    changed.setParameter (index, 0.5f);
+                    changed.setParameter (index, value);
+                    if (! sameBits (cached.mapped (index), changed.mapped (index))
+                        || ! sameBits (cached.getParameter (index), value))
+                    {
+                        std::cerr << "    FAILED: parameter " << index << " at " << value << std::endl;
+                        return false;
+                    }
+                }
+            }
+        }
+        if (cached.mapped (pDownsample) != 1.0f || cached.mapped (pLongModes) != 2.0f
+            || cached.USE_DWGS4 != 0)
+            return false;
+
+        cached.setParameter (pHammerCompliance, -0.0f);
+        if (! std::signbit (cached.mapped (pHammerCompliance))
+            || ! std::signbit (cached.getParameter (pHammerCompliance)))
+            return false;
+
+        // Soundboard parameters retain their existing tolerance and only
+        // request a rebuild when the mapped value changes enough.
+        for (int index : { pSoundboardDecay, pSoundboardLopass })
+        {
+            cached.setParameter (index, 0.5f);
+            const float mapped = cached.mapped (index);
+            cached.acknowledgeBoard();
+            for (float value : { 0.5f, 0.5000001f, 0.5000001f })
+            {
+                cached.setParameter (index, value);
+                if (cached.boardDirty() || ! sameBits (cached.mapped (index), mapped))
+                    return false;
+            }
+            cached.setParameter (index, 0.51f);
+            if (! cached.boardDirty() || cached.mapped (index) == mapped)
+                return false;
+        }
+        std::cout << "    Parameter updates: PASSED" << std::endl;
+        return true;
+    }
+
     // These parameters used to be ignored by the engine. Both settings must
     // render a sane chord, and the two renders must differ.
     bool testChangesSound (const char* name, int param, float a, float b)
@@ -2905,8 +2970,14 @@ public:
         allPassed &= testNoAllocations();
         allPassed &= testPlayhead();
         allPassed &= testSidebarLayout();
+        allPassed &= testTruePeakMeter();
+        allPassed &= testMidiExport();
         allPassed &= testVoicingPresets();
         allPassed &= testStereoWidth();
+        allPassed &= testPhysicalGrand();
+        allPassed &= testRefinedTreble2();
+        allPassed &= testReferenceRate();
+        allPassed &= testRefinedTrebleRates();
 
         if (allPassed)
             std::cout << "All processor tests PASSED" << std::endl;
@@ -2917,6 +2988,361 @@ public:
     }
 
 private:
+    bool testReferenceRate()
+    {
+        std::cout << "  Testing reference-rate conversion, latency and MIDI boundaries..." << std::endl;
+        for (double rate : { 8000.0, 22050.0, 44100.0, 88200.0, 96000.0, 192000.0 })
+        {
+            PianoReferenceRate converter;
+            converter.prepare (rate);
+            int sourceFrame = 0;
+            const int length = int (rate * 0.06);
+            juce::AudioBuffer<float> audio (2, length);
+            juce::MidiBuffer midi;
+            converter.process (audio, midi, [&] (auto& block, auto&)
+            {
+                for (int i = 0; i < block.getNumSamples(); ++i, ++sourceFrame)
+                    for (int ch = 0; ch < 2; ++ch)
+                        block.setSample (ch, i, float (std::sin (2 * PI * 1000 * sourceFrame / 48000.0)));
+            });
+            const int latency = PianoReferenceRate::latencyFor (rate);
+            double error = 0;
+            for (int i = int (0.02 * rate); i < length; ++i)
+            {
+                error = std::max (error, std::abs (audio.getSample (0, i) - std::sin (2 * PI * 1000 * (i - latency) / rate)));
+                if (audio.getSample (0, i) != audio.getSample (1, i)) return false;
+            }
+            if (error > 0.001)
+            {
+                std::cerr << "    FAILED: resampling amplitude/latency @ " << rate << ": " << error << std::endl;
+                return false;
+            }
+
+            converter.reset();
+            sourceFrame = 0;
+            converter.process (audio, midi, [&] (auto& block, auto&)
+            {
+                for (int i = 0; i < block.getNumSamples(); ++i, ++sourceFrame)
+                    for (int ch = 0; ch < 2; ++ch)
+                        block.setSample (ch, i, sourceFrame == 192 ? 1.0f : 0.0f);
+            });
+            int peak = 0;
+            for (int i = 1; i < length; ++i)
+                if (std::abs (audio.getSample (0, i)) > std::abs (audio.getSample (0, peak))) peak = i;
+            if (std::abs (peak - (latency + int (std::lround (192 * rate / 48000.0)))) > 1) return false;
+
+            if (rate < 48000.0)
+            {
+                converter.reset();
+                sourceFrame = 0;
+                const double frequency = std::min (23000.0, rate * .75);
+                converter.process (audio, midi, [&] (auto& block, auto&)
+                {
+                    for (int i = 0; i < block.getNumSamples(); ++i, ++sourceFrame)
+                        for (int ch = 0; ch < 2; ++ch)
+                            block.setSample (ch, i, float (std::sin (2 * PI * frequency * sourceFrame / 48000.0)));
+                });
+                double aliasEnergy = 0;
+                const int first = int (.02 * rate);
+                for (int i = first; i < length; ++i) aliasEnergy += double (audio.getSample (0, i)) * audio.getSample (0, i);
+                if (aliasEnergy / (length - first) > 1e-4) return false;
+            }
+
+            converter.reset();
+            const std::array<int, 11> positions { 0, 1, 2, 63, 64, 65, 127, 128, 255, 256, 1001 };
+            const std::array<int, 7> blocks { 0, 1, 7, 127, 3, 64, 257 };
+            std::vector<std::pair<int, int>> received;
+            size_t eventIndex = 0, blockIndex = 0;
+            int hostFrame = 0;
+            sourceFrame = 0;
+            while (hostFrame < 2000)
+            {
+                const int count = std::min (blocks[blockIndex++ % blocks.size()], 2000 - hostFrame);
+                audio.setSize (2, count, false, false, true);
+                midi.clear();
+                while (eventIndex < positions.size()
+                       && (positions[eventIndex] < hostFrame + count || (count == 0 && positions[eventIndex] == hostFrame)))
+                {
+                    midi.addEvent (juce::MidiMessage::noteOn (1, 40 + int (eventIndex), juce::uint8 (84)), positions[eventIndex] - hostFrame);
+                    ++eventIndex;
+                }
+                converter.process (audio, midi, [&] (auto& block, auto& events)
+                {
+                    for (const auto meta : events)
+                        received.emplace_back (meta.getMessage().getNoteNumber(), sourceFrame + meta.samplePosition);
+                    sourceFrame += block.getNumSamples();
+                    block.clear();
+                });
+                hostFrame += count;
+            }
+            if (received.size() != positions.size()) return false;
+            for (size_t i = 0; i < positions.size(); ++i)
+            {
+                const double delay = received[i].second / 48000.0 - positions[i] / rate;
+                if (received[i].first != 40 + int (i) || delay < -1e-10 || delay > 1.0 / 48000 + 1e-10) return false;
+            }
+        }
+        std::cout << "    Reference-rate conversion: PASSED" << std::endl;
+        return true;
+    }
+
+    bool testRefinedTrebleRates()
+    {
+        std::cout << "  Testing balanced treble across sample rates..." << std::endl;
+        double worst = 0;
+        for (int note : { 60, 72, 73, 84, 93, 99, 107, 108 })
+            for (int velocity : { 40, 84, 127 })
+            {
+                double reference = 0;
+                for (double rate : { 48000.0, 44100.0, 88200.0, 96000.0, 192000.0 })
+                {
+                    PianoAudioProcessor proc;
+                    proc.setCurrentProgram ("Warm Body + Refined Treble 2");
+                    proc.setRateAndBufferSizeDetails (rate, 64);
+                    proc.prepareToPlay (rate, 64);
+                    const int latency = proc.getLatencySamples();
+                    const auto audio = renderProcessor (proc, {{ 0, juce::MidiMessage::noteOn (1, note, juce::uint8 (velocity)) }},
+                                                         { 1, 127, 0, 257, 3 }, latency + int (rate * 0.3));
+                    double energy = 0;
+                    const int first = latency + int (rate * .05), last = latency + int (rate * .25);
+                    for (int i = first; i < last; ++i) energy += double (audio[size_t (i)]) * audio[size_t (i)];
+                    energy /= last - first;
+                    if (rate == 48000.0) reference = energy;
+                    const double delta = std::abs (10 * std::log10 (energy / reference));
+                    worst = std::max (worst, delta);
+                    if (! std::isfinite (delta) || delta > 0.15)
+                    {
+                        std::cerr << "    FAILED: note " << note << " velocity " << velocity << " @ " << rate << ": " << delta << " dB" << std::endl;
+                        return false;
+                    }
+                }
+            }
+        for (double rate : { 44100.0, 96000.0 })
+        {
+            PianoAudioProcessor proc;
+            proc.setCurrentProgram ("Warm Body + Refined Treble 2");
+            proc.setRateAndBufferSizeDetails (rate, 64);
+            proc.prepareToPlay (rate, 64);
+            const std::vector<Event> events {{0, juce::MidiMessage::noteOn (1, 99, juce::uint8 (127))}};
+            // Switching resets a previously played engine. Compare with an
+            // explicit reset, after its one-time filter priming has run.
+            renderProcessor (proc, events, { 64 }, 8192);
+            proc.reset();
+            const auto before = renderProcessor (proc, events, { 7, 101, 512, 3 }, 8192);
+            juce::AudioBuffer<float> empty (2, 0);
+            juce::MidiBuffer midi;
+            for (int mode : { int (PianoVoicing::warmModel), int (PianoVoicing::refinedTreble2) })
+            {
+                proc.setVoicing (mode);
+                g_allocationCount = 0;
+                t_countAllocations = true;
+                proc.processBlock (empty, midi);
+                t_countAllocations = false;
+                const int latency = mode == PianoVoicing::refinedTreble2 ? PianoReferenceRate::latencyFor (rate) : 64;
+                if (g_allocationCount != 0 || proc.getLatencySamples() != latency)
+                {
+                    std::cerr << "    FAILED: switch to voicing " << mode << " @ " << rate
+                              << ": allocations=" << g_allocationCount << ", latency=" << proc.getLatencySamples()
+                              << " (expected " << latency << ")" << std::endl;
+                    return false;
+                }
+            }
+            const auto after = renderProcessor (proc, events, { 64 }, 8192);
+            if (before != after)
+            {
+                double difference = 0, energy = 0, maximum = 0;
+                for (size_t i = 0; i < before.size(); ++i)
+                {
+                    const double delta = double (after[i]) - before[i];
+                    difference += delta * delta;
+                    energy += double (before[i]) * before[i];
+                    maximum = std::max (maximum, std::abs (delta));
+                }
+                std::cerr << "    FAILED: switch changed reference sound @ " << rate
+                          << ": relative error=" << 10 * std::log10 (difference / energy)
+                          << " dB, peak difference=" << maximum << std::endl;
+                return false;
+            }
+        }
+        std::cout << "    Sample-rate level agreement and voicing switches: PASSED (worst " << worst << " dB)" << std::endl;
+        return true;
+    }
+
+    bool testRefinedTreble2()
+    {
+        std::cout << "  Testing selected Refined Treble 2, undamped keys and baseline preservation..." << std::endl;
+        auto prepare = [] (double rate, bool updated)
+        {
+            auto p = createProcessor (64);
+            p->setCurrentProgram (updated ? "Warm Body + Refined Treble 2" : "Warm Body + Refined Treble");
+            p->setRateAndBufferSizeDetails (rate, 64);
+            p->prepareToPlay (rate, 64);
+            return p;
+        };
+        for (double rate : { 44100.0, 48000.0, 96000.0 })
+        {
+            auto baseline = prepare (rate, false), selected = prepare (rate, true);
+            const int latency = rate == 48000.0 ? 64 : PianoReferenceRate::latencyFor (rate);
+            if (selected->getVoicing() != PianoVoicing::refinedTreble2 || selected->getLatencySamples() != latency)
+                return false;
+            const std::vector<Event> lower {
+                { 7, juce::MidiMessage::noteOn (1, 36, juce::uint8 (72)) },
+                { 91, juce::MidiMessage::noteOn (1, 60, juce::uint8 (84)) },
+                { 111, juce::MidiMessage::noteOn (1, 72, juce::uint8 (91)) },
+                { 591, juce::MidiMessage::noteOn (1, 67, juce::uint8 (100)) },
+                { 4097, juce::MidiMessage::allNotesOff (1) }
+            };
+            if (rate == 48000.0 && renderProcessor (*baseline, lower, { 64 }, 16384)
+                != renderProcessor (*selected, lower, { 1, 127, 3, 512 }, 16384))
+            {
+                std::cerr << "    FAILED: baseline changed at or below C5 @ " << rate << std::endl;
+                return false;
+            }
+            for (int note : { 88, 89, 96, 108 })
+            {
+                auto held = prepare (rate, true), released = prepare (rate, true);
+                std::vector<Event> on { { 13, juce::MidiMessage::noteOn (1, note, juce::uint8 (84)) } };
+                auto off = on;
+                off.push_back ({ 1001, juce::MidiMessage::noteOff (1, note) });
+                const auto a = renderProcessor (*held, on, { 64 }, 24000);
+                const auto b = renderProcessor (*released, off, { 3, 91, 0, 257 }, 24000);
+                double difference = 0, energy = 0, heldTail = 0, releasedTail = 0;
+                for (size_t i = 0; i < a.size(); ++i)
+                {
+                    const double delta = double (a[i]) - b[i];
+                    difference += delta * delta;
+                    energy += double (a[i]) * a[i];
+                    if (i >= 12000)
+                    {
+                        heldTail += double (a[i]) * a[i];
+                        releasedTail += double (b[i]) * b[i];
+                    }
+                }
+                // An extra MIDI event splits the convolution call and can
+                // change its floating-point rounding. Require equality to
+                // -120 dB relative energy, not identical bits across that split.
+                if (note >= 89 ? difference > 1e-12 * std::max (energy, 1e-30)
+                               : releasedTail >= .5 * heldTail)
+                {
+                    std::cerr << "    FAILED: incorrect damper on note " << note << " @ " << rate << std::endl;
+                    return false;
+                }
+            }
+            auto a = prepare (rate, true), b = prepare (rate, true);
+            const std::vector<Event> repeated {
+                { 3, juce::MidiMessage::noteOn (1, 96, juce::uint8 (70)) },
+                { 104, juce::MidiMessage::controllerEvent (1, 64, 127) },
+                { 1003, juce::MidiMessage::noteOff (1, 96) },
+                { 2007, juce::MidiMessage::noteOn (1, 96, juce::uint8 (100)) },
+                { 3001, juce::MidiMessage::noteOn (2, 108, juce::uint8 (110)) },
+                { 4097, juce::MidiMessage::allNotesOff (1) },
+                { 5101, juce::MidiMessage::controllerEvent (1, 64, 0) },
+                { 7003, juce::MidiMessage::allSoundOff (1) },
+                { 13001, juce::MidiMessage::allSoundOff (2) }
+            };
+            const auto regular = renderProcessor (*a, repeated, { 64 }, 16384);
+            const auto irregular = renderProcessor (*b, repeated, { 0, 1, 997, 17, 64 }, 16384);
+            if (regular != irregular) return false;
+            double remaining = 0;
+            for (size_t i = 7300; i < 12500; ++i) remaining += double (regular[i]) * regular[i];
+            if (remaining < 1e-12) return false;
+            const int filterTail = rate == 48000.0 ? 0 : int (std::ceil (PianoReferenceRate::halfLength * rate / 48000.0));
+            for (size_t i = size_t (13001 + latency + filterTail + 3); i < regular.size(); ++i)
+                if (regular[i] != 0) return false;
+
+            a->reset();
+            juce::AudioBuffer<float> audio (2, 64);
+            juce::MidiBuffer midi;
+            midi.ensureSize (4096);
+            for (int block = 0; block < 180; ++block)
+            {
+                midi.clear();
+                if (block == 0 || block == 80)
+                    for (int note : { 36, 60, 84, 89, 96, 103, 108 })
+                        midi.addEvent (juce::MidiMessage::noteOn (1, note, juce::uint8 (block == 0 ? 40 : 127)), 7);
+                if (block == 30 || block == 110) midi.addEvent (juce::MidiMessage::allNotesOff (1), 17);
+                g_allocationCount = 0;
+                t_countAllocations = true;
+                a->processBlock (audio, midi);
+                t_countAllocations = false;
+                if (g_allocationCount != 0) return false;
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < 64; ++i)
+                        if (! std::isfinite (audio.getSample (ch, i))) return false;
+            }
+        }
+        std::cout << "    Refined Treble 2 integration: PASSED" << std::endl;
+        return true;
+    }
+
+    bool testPhysicalGrand()
+    {
+        std::cout << "  Testing physical grand pedal, channel ownership, latency and block boundaries..." << std::endl;
+        const std::vector<Event> events {
+            {13,juce::MidiMessage::noteOn(1,72,juce::uint8(84))},
+            {101,juce::MidiMessage::noteOn(1,48,juce::uint8(70))},
+            {1000,juce::MidiMessage::controllerEvent(1,64,31)},
+            {1800,juce::MidiMessage::noteOff(1,72)},
+            {2500,juce::MidiMessage::controllerEvent(1,64,63)},
+            {3001,juce::MidiMessage::noteOff(1,48)},
+            {4200,juce::MidiMessage::noteOn(2,84,juce::uint8(100))},
+            {5200,juce::MidiMessage::controllerEvent(1,64,96)},
+            {6200,juce::MidiMessage::noteOn(1,72,juce::uint8(66))},
+            {7100,juce::MidiMessage::noteOn(1,96,juce::uint8(90))},
+            {7500,juce::MidiMessage::noteOff(1,96)},
+            {8000,juce::MidiMessage::allNotesOff(1)},
+            {10000,juce::MidiMessage::controllerEvent(1,121,0)},
+            {11000,juce::MidiMessage::allSoundOff(1)},
+            {13000,juce::MidiMessage::allSoundOff(2)}
+        };
+        for(double rate:{44100.0,48000.0,96000.0})
+        {
+            auto a=createProcessor(64),b=createProcessor(64);
+            for(auto* p:{a.get(),b.get()})
+            {
+                p->setCurrentProgram("Physical Grand");p->setRateAndBufferSizeDetails(rate,64);p->prepareToPlay(rate,64);
+                if(p->getVoicing()!=PianoVoicing::physicalGrand || p->getLatencySamples()!=96) return false;
+            }
+            const auto regular=renderProcessor(*a,events,{64},16384);
+            const auto irregular=renderProcessor(*b,events,{1,17,0,251,1024,3},16384);
+            if(regular!=irregular || rms(regular,0.0f,.1f)<1e-7f) return false;
+            for(size_t i=13200;i<regular.size();++i) if(regular[i]!=0) return false;
+
+            a->reset();
+            juce::AudioBuffer<float> audio(2,64);juce::MidiBuffer midi;midi.ensureSize(2048);
+            bool finite=true;
+            for(int block=0;block<160;++block)
+            {
+                midi.clear();
+                if(block==0)
+                {
+                    midi.addEvent(juce::MidiMessage::controllerEvent(1,64,78),0);
+                    for(int note:{48,60,72,84,96,108}) midi.addEvent(juce::MidiMessage::noteOn(1,note,juce::uint8(100)),7);
+                }
+                if(block==30) midi.addEvent(juce::MidiMessage::allNotesOff(1),23);
+                if(block==60) midi.addEvent(juce::MidiMessage::controllerEvent(1,64,0),17);
+                g_allocationCount=0;t_countAllocations=true;
+                a->processBlock(audio,midi);
+                t_countAllocations=false;
+                if(g_allocationCount!=0) return false;
+                for(int c=0;c<2;++c) for(int i=0;i<64;++i) finite&=std::isfinite(audio.getSample(c,i));
+            }
+            if(!finite) return false;
+        }
+        auto proc=createProcessor(64);proc->setVoicing(PianoVoicing::physicalGrand);
+        const std::vector<Event> shared {
+            {0,juce::MidiMessage::noteOn(1,84,juce::uint8(84))},
+            {512,juce::MidiMessage::noteOn(2,84,juce::uint8(84))},
+            {1024,juce::MidiMessage::allSoundOff(1)},
+            {4096,juce::MidiMessage::allSoundOff(2)}
+        };
+        const auto signal=renderProcessor(*proc,shared,{64},8192);
+        double retained=0;for(int i=1500;i<4000;++i) retained+=double(signal[size_t(i)])*signal[size_t(i)];
+        if(retained<1e-9) return false;
+        for(size_t i=4300;i<signal.size();++i) if(signal[i]!=0) return false;
+        std::cout << "    Physical Grand integration: PASSED" << std::endl;return true;
+    }
+
     bool testStereoWidth()
     {
         std::cout << "  Testing stereo placement, mono fold-down, automation and state..." << std::endl;
@@ -2948,7 +3374,7 @@ private:
         };
 
         for (double rate : { 44100.0, 48000.0, 96000.0 })
-            for (int mode : { 0, 1, 2 })
+            for (int mode : { 0, 1, 2, 3, 4, 5, 6 })
             {
                 auto mono = createProcessor (64);
                 auto wide = createProcessor (64);
@@ -2976,7 +3402,8 @@ private:
                         right += double (b[i][1]) * b[i][1];
                         difference += std::abs (b[i][0] - b[i][1]);
                     }
-                    if (difference < 1e-5 || (note < 60 && left <= right) || (note > 60 && right <= left)) return false;
+                    if (difference < 1e-5) return false;
+                    if (mode!=PianoVoicing::physicalGrand && ((note < 60 && left <= right) || (note > 60 && right <= left))) return false;
 
                     // Reset must clear both body paths and the reflection taps.
                     wide->reset();
@@ -2998,10 +3425,13 @@ private:
                 for (int i = 0; i < 64; ++i) wide->processBlock (audio, midi);
                 midi.addEvent (juce::MidiMessage::allSoundOff (1), 0);
                 wide->processBlock (audio, midi);
+                const int resamplerTail = mode == PianoVoicing::refinedTreble2 && rate != 48000.0
+                                            ? int (std::ceil (PianoReferenceRate::halfLength * rate / 48000.0)) : 0;
+                const int silentBlock = (wide->getLatencySamples() + resamplerTail + 63) / 64;
                 for (int i = 0; i < 128; ++i)
                 {
                     wide->processBlock (audio, midi);
-                    if (audio.getMagnitude (0, 64) != 0.0f) return false;
+                    if (i + 1 >= silentBlock && audio.getMagnitude (0, 64) != 0.0f) return false;
                 }
 
                 parameter->setValue (0.6f);
@@ -3030,6 +3460,224 @@ private:
         }
         if (previous != 1.0f) return false;
         std::cout << "    Stereo width: PASSED" << std::endl;
+        return true;
+    }
+
+    bool testTruePeakMeter()
+    {
+        std::cout << "  Testing the true peak meter..." << std::endl;
+
+        // A quarter rate sine sampled 45 degrees off its peaks: the samples
+        // reach 0.707, the waveform 1. It fades in and out, as a sine that
+        // starts suddenly really does go over 1.
+        juce::AudioBuffer<float> sine (2, 4096);
+        for (int i = 0; i < sine.getNumSamples(); i++)
+        {
+            const double fade = std::sin (juce::MathConstants<double>::pi * i / sine.getNumSamples());
+            for (int ch = 0; ch < 2; ch++)
+                sine.setSample (ch, i, float (fade * fade * std::sin (juce::MathConstants<double>::halfPi * i + juce::MathConstants<double>::pi / 4)));
+        }
+
+        gin::TruePeakMeter meter (2);
+        meter.process (sine, 0, sine.getNumSamples());
+        meter.finish();
+
+        if (std::abs (meter.getPeak() - 1.0f) > 0.005f)
+        {
+            std::cerr << "    FAILED: quarter rate sine read as " << meter.getPeak() << ", expected 1" << std::endl;
+            return false;
+        }
+
+        // A lone full scale sample is its own peak
+        juce::AudioBuffer<float> click (1, 64);
+        click.clear();
+        click.setSample (0, 10, -1.0f);
+        gin::TruePeakMeter clickMeter (1);
+        clickMeter.process (click, 0, 64);
+        clickMeter.finish();
+
+        if (clickMeter.getPeak() < 1.0f || clickMeter.getPeak() > 1.1f)
+        {
+            std::cerr << "    FAILED: click read as " << clickMeter.getPeak() << std::endl;
+            return false;
+        }
+
+        std::cout << "    True peak meter: PASSED" << std::endl;
+        return true;
+    }
+
+    bool testMidiExport()
+    {
+        std::cout << "  Testing MIDI file export to WAV..." << std::endl;
+
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("PianoExportTest");
+        dir.deleteRecursively();
+        dir.createDirectory();
+        const juce::ScopeGuard cleanUp { [dir] { dir.deleteRecursively(); } };
+
+        auto writeMidi = [&] (const juce::String& name, bool withNotes)
+        {
+            juce::MidiMessageSequence track;
+            track.addEvent (juce::MidiMessage::tempoMetaEvent (500000), 0);
+
+            // Full velocity chords over the whole range, half a second each
+            if (withNotes)
+                for (int chord = 0; chord < 3; chord++)
+                {
+                    for (int note : { 33, 45, 57, 60, 64, 67, 72, 76, 79, 84 })
+                    {
+                        track.addEvent (juce::MidiMessage::noteOn (1, note, juce::uint8 (127)), chord * 480.0);
+                        track.addEvent (juce::MidiMessage::noteOff (1, note), chord * 480.0 + 470.0);
+                    }
+                }
+            else
+                track.addEvent (juce::MidiMessage::controllerEvent (1, 7, 100), 960.0);
+
+            track.updateMatchedPairs();
+
+            juce::MidiFile midi;
+            midi.setTicksPerQuarterNote (480);
+            midi.addTrack (track);
+
+            auto file = dir.getChildFile (name);
+            juce::FileOutputStream stream (file);
+            midi.writeTo (stream);
+            return file;
+        };
+
+        const auto chords = writeMidi ("chords.mid", true);
+        const auto silent = writeMidi ("silent.mid", false);
+
+        // Volume at its top is ~30 dB over full scale for these chords
+        auto exportAt = [&] (float volume, bool normalize, const juce::File& midi, const juce::File& wav)
+        {
+            PianoAudioProcessor::launchCrashReporter = false;
+            PianoAudioProcessor proc;
+            for (auto* param : proc.getPluginParameters())
+                if (param->getUid() == "Volume")
+                    param->setValue (volume);
+
+            gin::MidiFileExporter::Options options;
+            options.normalize = normalize;
+            options.maxTailSeconds = 4.0;
+            return gin::MidiFileExporter::render (proc, midi, wav, SAMPLE_RATE, options);
+        };
+
+        struct Measured
+        {
+            int channels = 0, bits = 0;
+            juce::int64 length = 0;
+            float samplePeak = 0.0f, truePeak = 0.0f;
+        };
+
+        auto measure = [] (const juce::File& wav)
+        {
+            Measured m;
+            juce::WavAudioFormat format;
+            std::unique_ptr<juce::AudioFormatReader> reader (format.createReaderFor (wav.createInputStream().release(), true));
+            if (reader == nullptr)
+                return m;
+
+            m.channels = int (reader->numChannels);
+            m.bits = int (reader->bitsPerSample);
+            m.length = reader->lengthInSamples;
+
+            juce::AudioBuffer<float> audio (m.channels, int (m.length));
+            reader->read (&audio, 0, int (m.length), 0, true, true);
+            m.samplePeak = audio.getMagnitude (0, audio.getNumSamples());
+
+            gin::TruePeakMeter meter (m.channels);
+            meter.process (audio, 0, audio.getNumSamples());
+            meter.finish();
+            m.truePeak = meter.getPeak();
+            return m;
+        };
+
+        const float ceiling = juce::Decibels::decibelsToGain (-1.0f);
+        const float tolerance = 1.0e-4f;
+
+        // Loud enough to clip, without normalize: turned down to the ceiling
+        {
+            auto wav = dir.getChildFile ("loud.wav");
+            auto result = exportAt (1.0f, false, chords, wav);
+            auto m = measure (wav);
+
+            if (result.status.failed() || result.renderedPeak <= 1.0f || result.gain >= 1.0f)
+            {
+                std::cerr << "    FAILED: loud render " << result.status.getErrorMessage() << ", peak " << result.renderedPeak
+                          << ", gain " << result.gain << std::endl;
+                return false;
+            }
+
+            if (m.channels != 2 || m.bits != 24 || m.length < juce::int64 (1.5 * SAMPLE_RATE)
+                || m.truePeak > ceiling + tolerance || m.samplePeak >= 1.0f)
+            {
+                std::cerr << "    FAILED: loud file has " << m.channels << " channels, " << m.bits << " bits, "
+                          << m.length << " samples, sample peak " << m.samplePeak << ", true peak " << m.truePeak << std::endl;
+                return false;
+            }
+        }
+
+        // Quiet, without normalize: written as rendered
+        float quietPeak = 0.0f;
+        {
+            auto wav = dir.getChildFile ("quiet.wav");
+            auto result = exportAt (0.3f, false, chords, wav);
+            auto m = measure (wav);
+            quietPeak = result.renderedPeak;
+
+            if (result.status.failed() || result.gain != 1.0f || result.renderedPeak <= 0.0f || result.renderedPeak >= ceiling
+                || std::abs (m.truePeak - result.renderedPeak) > tolerance)
+            {
+                std::cerr << "    FAILED: quiet render peak " << result.renderedPeak << ", gain " << result.gain
+                          << ", file peak " << m.truePeak << std::endl;
+                return false;
+            }
+        }
+
+        // Normalized, from both sides: the peak lands on the ceiling
+        for (float volume : { 0.3f, 1.0f })
+        {
+            auto wav = dir.getChildFile ("normalized.wav");
+            auto result = exportAt (volume, true, chords, wav);
+            auto m = measure (wav);
+
+            if (result.status.failed() || std::abs (m.truePeak - ceiling) > tolerance || m.samplePeak > ceiling + tolerance
+                || (volume < 0.5f && ! juce::approximatelyEqual (result.gain, ceiling / quietPeak)))
+            {
+                std::cerr << "    FAILED: normalized at volume " << volume << " has true peak " << m.truePeak
+                          << ", gain " << result.gain << std::endl;
+                return false;
+            }
+        }
+
+        // Nothing to play: silence, not an infinite gain
+        {
+            auto wav = dir.getChildFile ("silent.wav");
+            auto result = exportAt (1.0f, true, silent, wav);
+            auto m = measure (wav);
+
+            if (result.status.failed() || result.gain != 1.0f || m.length <= 0 || m.samplePeak != 0.0f)
+            {
+                std::cerr << "    FAILED: silent export gain " << result.gain << ", peak " << m.samplePeak << std::endl;
+                return false;
+            }
+        }
+
+        // Cancelling leaves no file behind
+        {
+            auto wav = dir.getChildFile ("cancelled.wav");
+            PianoAudioProcessor proc;
+            auto result = gin::MidiFileExporter::render (proc, chords, wav, SAMPLE_RATE, {}, [] (double p) { return p < 0.3; });
+
+            if (! result.cancelled || wav.exists())
+            {
+                std::cerr << "    FAILED: cancelled export left " << wav.getFullPathName() << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "    MIDI export: PASSED" << std::endl;
         return true;
     }
 
@@ -3093,8 +3741,8 @@ private:
     {
         std::cout << "  Testing warm voicing persistence, reset and block independence..." << std::endl;
         const auto presetDir = juce::File (__FILE__).getParentDirectory().getParentDirectory().getChildFile ("presets");
-        const char* names[] = { "Warm Body", "Warm Body + Detail" };
-        for (int mode = 1; mode <= 2; ++mode)
+        const char* names[] = { "Warm Body", "Warm Body + Detail", "Warm Body + Full Treble", "Warm Body + Refined Treble", "Physical Grand", "Warm Body + Refined Treble 2" };
+        for (int mode = 1; mode <= 6; ++mode)
         {
             auto proc = createProcessor (64);
             gin::Program program;
@@ -3102,6 +3750,15 @@ private:
             program.loadProcessor (*proc);
             proc->stateUpdated();
             if (proc->getVoicing() != mode) return false;
+
+            if (PianoVoicing::hasFullTreble (mode) || mode==PianoVoicing::physicalGrand)
+            {
+                auto bundled = createProcessor (64);
+                bundled->setCurrentProgram (juce::String (names[mode - 1]));
+                if (bundled->getVoicing() != mode) return false;
+                for (auto* p : proc->getPluginParameters())
+                    if (p->getValue() != bundled->getParameter (p->getUid())->getValue()) return false;
+            }
 
             juce::MemoryBlock saved;
             proc->getStateInformation (saved);
@@ -3114,6 +3771,9 @@ private:
                 { 3000, juce::MidiMessage::controllerEvent (1, 64, 127) },
                 { 6000, juce::MidiMessage::noteOff (1, 48) },
                 { 9000, juce::MidiMessage::noteOn (1, 55, (juce::uint8) 80) },
+                { 9500, juce::MidiMessage::noteOn (1, 84, (juce::uint8) 90) },
+                { 12000, juce::MidiMessage::noteOff (1, 84) },
+                { 15000, juce::MidiMessage::noteOn (1, 84, (juce::uint8) 70) },
                 { 14000, juce::MidiMessage::controllerEvent (1, 64, 0) }
             };
             auto a = renderProcessor (*proc, events, { 64 }, 24000);
@@ -3152,7 +3812,7 @@ private:
                 restored->setRateAndBufferSizeDetails (rate, 64);
                 restored->prepareToPlay (rate, 64);
                 midi.clear();
-                midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 90), 0);
+                midi.addEvent (juce::MidiMessage::noteOn (1, 96, (juce::uint8) 90), 0);
                 g_allocationCount = 0;
                 t_countAllocations = true;
                 bool finite = true;

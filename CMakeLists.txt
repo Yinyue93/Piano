@@ -39,6 +39,10 @@ set (CMAKE_ERROR_ON_ABSOLUTE_INSTALL_DESTINATION ON)
 set (CMAKE_CXX_STANDARD 20)
 set (CMAKE_CXX_STANDARD_REQUIRED ON)
 set (CMAKE_CXX_EXTENSIONS OFF)
+if(MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64|x86|i.86")
+    # This file is reached only after an AVX2 + OSXSAVE runtime check.
+    set_source_files_properties(plugin/Source/PianoPhysicalAvx.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+endif()
 set (CMAKE_OBJCXX_STANDARD 20)
 set (CMAKE_OBJCXX_STANDARD_REQUIRED ON)
  set (CMAKE_CXX_VISIBILITY_PRESET hidden)
@@ -157,6 +161,21 @@ target_include_directories (${PLUGIN_NAME} PRIVATE modules/ASIO/common)
 target_include_directories (${PLUGIN_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source/Definitions)
 
 juce_generate_juce_header (${PLUGIN_NAME})
+
+set (TREBLE_PRESET_FILE "${CMAKE_SOURCE_DIR}/presets/Warm Body + Full Treble.xml")
+set_property (DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TREBLE_PRESET_FILE}")
+file (READ "${TREBLE_PRESET_FILE}" TREBLE_PRESET_XML)
+set (MODEL_PRESET_FILE "${CMAKE_SOURCE_DIR}/presets/Warm Body + Refined Treble.xml")
+set_property (DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${MODEL_PRESET_FILE}")
+file (READ "${MODEL_PRESET_FILE}" MODEL_PRESET_XML)
+set (PHYSICAL_PRESET_FILE "${CMAKE_SOURCE_DIR}/presets/Physical Grand.xml")
+set_property (DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PHYSICAL_PRESET_FILE}")
+file (READ "${PHYSICAL_PRESET_FILE}" PHYSICAL_PRESET_XML)
+set (REFINED2_PRESET_FILE "${CMAKE_SOURCE_DIR}/presets/Warm Body + Refined Treble 2.xml")
+set_property (DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${REFINED2_PRESET_FILE}")
+file (READ "${REFINED2_PRESET_FILE}" REFINED2_PRESET_XML)
+configure_file (plugin/PianoTreblePreset.h.in generated/PianoTreblePreset.h @ONLY)
+target_include_directories (${PLUGIN_NAME} PRIVATE "${CMAKE_BINARY_DIR}/generated")
 
 target_compile_definitions (${PLUGIN_NAME} PRIVATE
 								JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1

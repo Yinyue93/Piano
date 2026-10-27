@@ -3,7 +3,8 @@
 	url = https://github.com/juce-framework/JUCE.git
 [submodule "modules/gin"]
 	path = modules/gin
-	url = https://github.com/FigBug/Gin.git
+	url = https://github.com/Yinyue93/Gin.git
+	branch = piano
 [submodule "modules/plugin_sdk"]
 	path = modules/plugin_sdk
 	url = https://github.com/TurnipHat/plugin_sdk.git

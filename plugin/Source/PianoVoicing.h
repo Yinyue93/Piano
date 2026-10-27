@@ -10,7 +10,11 @@
 class PianoVoicing
 {
 public:
-    enum Mode { classic = 0, warmBody = 1, warmDetail = 2 };
+    enum Mode { classic = 0, warmBody = 1, warmDetail = 2, warmTreble = 3, warmModel = 4, physicalGrand = 5,
+                refinedTreble2 = 6 };
+    static bool hasRefinedModel (int mode) { return mode == warmModel || mode == refinedTreble2; }
+    static bool hasFullTreble (int mode) { return mode == warmTreble || hasRefinedModel (mode); }
+    static bool hasDetail (int mode) { return mode == warmDetail || hasFullTreble (mode); }
     void prepare (double sampleRate)
     {
         const double ratio = 48000.0 / sampleRate;
@@ -45,7 +49,7 @@ public:
         for (int i = 0; i < samples; ++i)
         {
             double value = output[i];
-            if (mode == warmDetail)
+            if (hasDetail (mode))
             {
                 for (auto& filter : filters) value = filter.process (value);
                 value *= detailMakeup;

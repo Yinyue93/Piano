@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "BoundedMidi.h"
+#include "PianoTreblePreset.h"
 
 #include <mutex>
 
@@ -378,18 +379,48 @@ PianoAudioProcessor::~PianoAudioProcessor()
 //==============================================================================
 void PianoAudioProcessor::stateUpdated()
 {
-    requestedVoicing.store (juce::jlimit (0, 2, int (state.getProperty ("pianoVoicing", 0))),
+    requestedVoicing.store (juce::jlimit (0, int (PianoVoicing::refinedTreble2), int (state.getProperty ("pianoVoicing", 0))),
                            std::memory_order_relaxed);
 }
 
 void PianoAudioProcessor::setVoicing (int mode)
 {
-    state.setProperty ("pianoVoicing", juce::jlimit (0, 2, mode), nullptr);
+    state.setProperty ("pianoVoicing", juce::jlimit (0, int (PianoVoicing::refinedTreble2), mode), nullptr);
     stateUpdated();
 }
 
 void PianoAudioProcessor::updateState()
 {
+}
+
+void PianoAudioProcessor::loadAllPrograms()
+{
+    gin::Processor::loadAllPrograms();
+    // Bundle the comparison voicings so they are available without an installation
+    // write to the user's preset directory. A saved user copy takes precedence.
+    for (const auto* presetXml : { pianoTreblePresetXml, pianoModelPresetXml, pianoPhysicalPresetXml,
+                                 pianoRefined2PresetXml })
+    {
+        auto xml = juce::parseXML (presetXml);
+        if (! xml || getProgram (xml->getStringAttribute ("name")) != nullptr) continue;
+        auto program = std::make_unique<gin::Program>();
+        program->name = xml->getStringAttribute ("name");
+        program->author = xml->getStringAttribute ("author");
+        program->tags = juce::StringArray::fromTokens (xml->getStringAttribute ("tags"), " ", "");
+        if (auto* stateXml = xml->getChildByName ("state"))
+            program->state = juce::ValueTree::fromXml (*stateXml);
+        for (auto* param : xml->getChildIterator())
+            if (param->hasTagName ("param"))
+            {
+                gin::Parameter::ParamState value;
+                value.uid = param->getStringAttribute ("uid");
+                value.value = float (param->getDoubleAttribute ("val"));
+                program->parameters.add (value);
+            }
+        program->fullyLoaded = true;
+        program->isReadOnly = true;
+        programs.add (program.release());
+    }
 }
 
 //==============================================================================
@@ -409,21 +440,37 @@ void PianoAudioProcessor::reset()
 
     if (piano)
         piano->reset();
+    referenceRate.reset();
 }
 
 void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPerBlock)
 {
     Processor::prepareToPlay (newSampleRate, newSamplesPerBlock);
+    outputSampleRate = newSampleRate;
 
-    piano = std::make_unique<Piano>();
-    piano->init (float (newSampleRate), interalBlockSize);
-    piano->setVoicing (getVoicing());
-
-    int idx = 0;
-    for (auto p : params)
-        piano->setParameter (idx++, p->getValue());
-
-    piano->prepareNotes();
+    const bool otherRate = newSampleRate != PianoReferenceRate::sampleRate;
+    const int mode = getVoicing();
+    referenceRateActive = otherRate && mode == PianoVoicing::refinedTreble2;
+    auto prepareEngine = [this] (double rate, int mode)
+    {
+        auto engine = std::make_unique<Piano>();
+        engine->init (float (rate), interalBlockSize);
+        engine->setVoicing (mode);
+        int idx = 0;
+        for (auto p : params) engine->setParameter (idx++, p->getValue());
+        engine->prepareNotes();
+        return engine;
+    };
+    piano = prepareEngine (referenceRateActive ? PianoReferenceRate::sampleRate : newSampleRate, mode);
+    alternateRatePiano.reset();
+    if (otherRate)
+    {
+        alternateRatePiano = prepareEngine (referenceRateActive ? newSampleRate : PianoReferenceRate::sampleRate,
+                                            referenceRateActive ? PianoVoicing::classic : PianoVoicing::refinedTreble2);
+        referenceRate.prepare (newSampleRate);
+    }
+    else referenceRate.reset();
+    updateEngineLatency();
 
 	sustainPedal.reset();
 
@@ -441,6 +488,12 @@ void PianoAudioProcessor::prepareToPlay (double newSampleRate, int newSamplesPer
 
 void PianoAudioProcessor::releaseResources()
 {
+}
+
+void PianoAudioProcessor::updateEngineLatency()
+{
+    setLatencySamples (referenceRateActive ? PianoReferenceRate::latencyFor (outputSampleRate)
+                       : interalBlockSize + (piano->getVoicing() == PianoVoicing::physicalGrand ? PianoPhysical::latencySamples : 0));
 }
 
 void PianoAudioProcessor::updatePlayhead()
@@ -467,10 +520,21 @@ void PianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 {
     juce::ScopedNoDenormals noDenormals;
 
-    if (piano->getVoicing() != getVoicing())
+    // Use one request for the whole block, including the engine-rate switch.
+    // A newer UI request will be picked up on the following callback.
+    const int mode = getVoicing();
+    if (piano->getVoicing() != mode)
     {
+        const bool useReference = alternateRatePiano != nullptr && mode == PianoVoicing::refinedTreble2;
+        if (useReference != referenceRateActive)
+        {
+            piano->reset();
+            piano.swap (alternateRatePiano);
+            referenceRateActive = useReference;
+        }
         reset();
-        piano->setVoicing (getVoicing());
+        piano->setVoicing (mode);
+        updateEngineLatency();
     }
 
     auto numSamples = buffer.getNumSamples();
@@ -494,13 +558,28 @@ void PianoAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         midiLearn->processBlock (inputMidi, numSamples);
 
 	keyState.processNextMidiBuffer (inputMidi, 0, numSamples, true);
-	sustainPedal.processMidi (inputMidi, sustainedMidi, midiBufferBytes);
+    if(mode==PianoVoicing::physicalGrand)
+    {
+        sustainedMidi.clear();
+        for(const auto meta:inputMidi)
+            BoundedMidi::add(sustainedMidi,midiBufferBytes,meta.data,meta.numBytes,meta.samplePosition);
+    }
+    else sustainPedal.processMidi (inputMidi, sustainedMidi, midiBufferBytes);
 
     int idx = 0;
     for (auto p : params)
         piano->setParameter (idx++, p->getValue());
 
 	buffer.clear();
+
+    if (referenceRateActive)
+    {
+        referenceRate.process (buffer, sustainedMidi, [this] (juce::AudioBuffer<float>& audio, juce::MidiBuffer& events)
+        {
+            piano->process (const_cast<float**> (audio.getArrayOfWritePointers()), audio.getNumSamples(), events);
+        });
+        return;
+    }
 
 	// Go through the host block up to each engine block boundary: queue that
 	// stretch's MIDI, render the engine block once it's complete, then read

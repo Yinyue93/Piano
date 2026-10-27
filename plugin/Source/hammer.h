@@ -3,6 +3,7 @@
 
 class Hammer
 {
+    friend class PianoModelAudit;
 public:
     Hammer();
     void set (float Fs, float m, float K, float p, float Z, float alpha, int escapeDelay);

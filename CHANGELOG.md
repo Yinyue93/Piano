@@ -3,9 +3,73 @@
 Changes made in this fork of [FigBug/Piano](https://github.com/FigBug/Piano). The upstream
 release history is in [Changelist.txt](Changelist.txt).
 
+**Seek in the MIDI player**
+- In the standalone app, clicking or dragging on the MIDI file display moves the
+  playhead to that point, while playing or stopped.
+- The playhead is drawn on the same tick axis as the notes, so it stays on the
+  note being played in files with tempo changes, and a click lands on the note
+  under the mouse.
+
+**Export MIDI to WAV**
+- The standalone app's export button, next to the MIDI menu, renders the loaded
+  file to a 24-bit WAV with the current settings, faster than real time and
+  without interrupting playback. The render continues after the file ends until
+  the sound has died away (30 seconds at most, then it fades out).
+- The WAV's true peak stays at or below -1 dBTP, measured with 4x oversampling as
+  in ITU-R BS.1770. **Normalize** brings the peak to -1 dBTP; otherwise the
+  rendered level is kept unless it would go over.
+- The standalone sidebar scrolls, so every section stays reachable with a short
+  editor window.
+
+**gin fork**
+- The gin submodule now points at [Yinyue93/Gin](https://github.com/Yinyue93/Gin),
+  branch `piano`, which carries the standalone app changes above on top of the
+  upstream commit this fork used. Run `git submodule sync` and
+  `git submodule update --init` in an existing clone.
+
+**Refined Treble 2 balance and sample-rate consistency**
+- Adopted the approved Chopin treble-balance audition: shorter effective hammer
+  contact above C5 and cached per-note level compensation, with the original
+  MIDI velocity mapping, body response and stereo image.
+- Kept this voicing's synthesis at 48 kHz and added filtered output conversion
+  for other host rates, preventing upper partials from moving across narrow
+  soundboard resonances. Other voicings retain their original processing.
+- Latency remains 64 samples at 48 kHz and is approximately 2 ms at other rates,
+  reported to the host. MIDI timing, reset, sustain, mono fold-down and callback
+  allocations are covered by processor checks.
+- The approved 48 kHz WAV is preserved sample for sample. A 900-note sweep over
+  44.1, 48, 88.2, 96 and 192 kHz agrees within 0.0015 dB in the measured window.
+
+**Treble voicings**
+- Added **Warm Body + Full Treble** (voicing 3) from treble comparison 4: gentler
+  Detail EQ and less envelope attenuation on upper notes, fading in from C4 to C6.
+- Added **Warm Body + Refined Treble** (voicing 4) from treble-model comparison 4:
+  revised hammer contact, string dimensions, damping and bridge coupling fading in
+  from C4 to C5, on top of Full Treble's EQ and envelope.
+- Added **Warm Body + Refined Treble 2** (voicing 6), the selected A comparison:
+  corrects the transverse-force attenuation from internal oversampling (about
+  6 dB at 2x and 12 dB at 4x) and leaves F6-C8 undamped on key release.
+- The three presets are bundled in the app and include their audition volume and
+  60% stereo width. Earlier builds can't reproduce voicings 3, 4 and 6 from the
+  preset XML alone; the Warm Body and Warm Body + Detail presets also need this
+  fork's build. Existing presets and sessions keep the original model unless they
+  select a warm voicing.
+
+**Physical Grand experiment**
+- Added **Physical Grand** (voicing 5): modal treble strings with three detuned
+  strings and two vibration directions, one shared modeled soundboard,
+  sympathetic strings, continuous CC64 damping and a modeled coincident
+  microphone pair, with no samples or impulse responses. It reports 96 samples
+  of latency.
+- Kept as an experiment: it didn't win the listening comparison, which selected
+  Warm Body + Refined Treble 2. Details in [docs/physical-grand.md](docs/physical-grand.md).
+- Added the `PhysicalPianoTests` suite (`ctest -L physical`) and the
+  `PianoAudition` and render tools in `tools/`.
+
 **Stereo width**
 - Added a saved, automatable Stereo Width fader with bass-left/treble-right
-  placement and quiet, filtered early reflections for all three voicings.
+  placement and quiet, filtered early reflections for every voicing (Physical
+  Grand uses its microphone model instead).
 - Width changes ramp over 30 ms. Mono fold-down preserves the original signal;
   old presets and sessions retain their sound with a 0% default.
 - Stereo body and reflection buffers are prepared before playback and cleared

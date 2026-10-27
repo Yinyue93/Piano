@@ -44,7 +44,10 @@ public:
         history[size_t (position)] = high;
         const auto read = [this] (int delay)
         {
-            return history[size_t ((position + int (history.size()) - delay) % int (history.size()))];
+            // Both taps are shorter than the ring, so at most one wrap is needed.
+            int index = position - delay;
+            if (index < 0) index += int (history.size());
+            return history[size_t (index)];
         };
         const float side = width.getNextValue() * (bodySide + 0.12f * (read (nearTap) - read (farTap)));
         left = mid - side;

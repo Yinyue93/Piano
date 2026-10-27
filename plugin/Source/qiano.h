@@ -20,7 +20,9 @@ const int NUM_NOTES = 128;    // 128 midi notes
 #include "reverb.h"
 #include "hammer.h"
 #include "PianoVoicing.h"
+#include "PianoTreble.h"
 #include "PianoStereo.h"
+#include "PianoPhysical.h"
 
 enum {
     MaxDecimation = 16,
@@ -91,6 +93,7 @@ class Piano;
 
 class PianoNote
 {
+    friend class PianoModelAudit;
 public:
     PianoNote (int note, int Fs, Piano *piano);
     ~PianoNote();
@@ -103,6 +106,7 @@ public:
     // Returns false (and deactivates the note) if the strings can't be built
     bool triggerOn (float velocity, float* tune);
     void triggerOff();
+    void setDamper (float amount);
     bool isActive();
     void deActivate();
 
@@ -153,6 +157,8 @@ protected:
 
     double earlyTransient = 0.55, earlyGain = 1.0;
     double earlyStep = 1.0, earlySmoothing = 1.0;
+    PianoTreble treble;
+    float balancedTrebleGain = 1.0f;
 
     MSD2Filter bridge;
 
@@ -206,6 +212,7 @@ protected:
 
 class Piano
 {
+    friend class PianoModelAudit;
 public:
     Piano();
     ~Piano();
@@ -239,6 +246,7 @@ public:
     // Stops at once the notes only this channel was playing, and silences the
     // soundboard too once nothing sounds
     void allSoundOff (int channel);
+    void setPedal (int channel, float position);
 
     // The notes sounding now
     int getNumVoices() const;
@@ -252,6 +260,7 @@ public:
 protected:     
     friend class PianoNote;
     Value vals[NumParams];
+    std::array<bool, NumParams> parameterInitialised {};
     PianoNote* voiceList = nullptr;
     std::array<std::unique_ptr<PianoNote>, NUM_NOTES> noteArray;
 
@@ -268,6 +277,11 @@ protected:
     PianoVoicing voicing;
     PianoVoicing sideVoicing;
     PianoStereo stereo;
+    PianoPhysical physical;
+    std::array<float,16> physicalPedals {};
+    juce::SmoothedValue<float> physicalWidth { 0.0f };
+    void updatePhysicalPedal();
+    PianoPhysical::Parameters physicalParameters() const;
 
 #ifdef FDN_REVERB
     std::unique_ptr<Reverb> soundboard;

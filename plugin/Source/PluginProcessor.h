@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "qiano.h"
 #include "SustainPedal.h"
+#include "PianoReferenceRate.h"
 
 #include <atomic>
 
@@ -16,6 +17,7 @@ public:
 
     void stateUpdated() override;
     void updateState() override;
+    void loadAllPrograms() override;
 
     // Preset-specific voicing; old state without this property uses Classic.
     void setVoicing (int mode);
@@ -71,6 +73,13 @@ public:
 
 private:
     void updatePlayhead();
+    void updateEngineLatency();
+    // Prepared alongside the host-rate engine, so changing voicing does not
+    // allocate a new instrument on the audio thread.
+    std::unique_ptr<Piano> alternateRatePiano;
+    PianoReferenceRate referenceRate;
+    bool referenceRateActive = false;
+    double outputSampleRate = PianoReferenceRate::sampleRate;
     std::atomic<int> requestedVoicing { PianoVoicing::classic };
 
     //==============================================================================

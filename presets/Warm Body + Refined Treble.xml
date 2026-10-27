@@ -1,0 +1,39 @@
+<?xml version='1.0' encoding='utf-8'?>
+<state name="Warm Body + Refined Treble" author="Personal" tags="Piano Warm">
+  <state pianoVoicing="4" />
+  <param uid="YoungsModulus" val="0.5" />
+  <param uid="StringDensity" val="0.5" />
+  <param uid="HammerMass" val="0.5" />
+  <param uid="StringTension" val="0.5" />
+  <param uid="StringLength" val="0.25" />
+  <param uid="StringRadius" val="0.25" />
+  <param uid="HammerCompliance" val="0.5" />
+  <param uid="HammerSpringConstant" val="0.5" />
+  <param uid="HammerHysteresis" val="0.5" />
+  <param uid="HammerPosition" val="0.5" />
+  <param uid="BridgeImpedance" val="0.5" />
+  <param uid="BridgeHorizontalImpedance" val="0.5" />
+  <param uid="VerticalHorizontalImpedance" val="0.5" />
+  <param uid="SoundboardSize" val="0.552315" />
+  <param uid="StringDecay" val="0.25" />
+  <param uid="StringLopass" val="0.5" />
+  <param uid="DampedStringDecay" val="0.5" />
+  <param uid="DampedStringLopass" val="0.5" />
+  <param uid="SoundboardDecay" val="0.5" />
+  <param uid="SoundboardLopass" val="0.5" />
+  <param uid="LongitudinalGamma" val="0.5" />
+  <param uid="LongitudinalGammaQuadratic" val="0" />
+  <param uid="LongitudinalGammaDamped" val="0.5" />
+  <param uid="LongitudinalGammaQuadDamped" val="0" />
+  <param uid="LongitudinalMix" val="0.5" />
+  <param uid="LongitudinalTransverseMix" val="0.5" />
+  <param uid="Volume" val="0.74548320387708733" />
+  <param uid="MaxVelocity" val="0.5" />
+  <param uid="StringDetuning" val="0.5" />
+  <param uid="BridgeMass" val="0.5" />
+  <param uid="BridgeSpring" val="0.5" />
+  <param uid="Dwgs4" val="1" />
+  <param uid="Downsample" val="0" />
+  <param uid="LongModes" val="0" />
+  <param uid="StereoWidth" val="0.6" />
+</state>
