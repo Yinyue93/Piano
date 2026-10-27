@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793078982633,
+  "lastUpdate": 1793103174592,
   "repoUrl": "https://github.com/Yinyue93/Piano",
   "entries": {
     "Piano Performance (Windows)": [
@@ -6163,6 +6163,50 @@ window.BENCHMARK_DATA = {
           {
             "name": "16 voices",
             "value": 10.785,
+            "unit": "x realtime"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "committer": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "distinct": true,
+          "id": "c13047a33a9e949a4546b88ef2aa3cd17c923a6c",
+          "message": "Add Ctrl+O and Spacebar shortcuts to the standalone app\n\nCtrl+O opens the MIDI browser in the folder the last file came from;\nSpacebar plays or stops the loaded MIDI file.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-27T09:08:22-03:00",
+          "tree_id": "bc5fba271b13cda1cdf1de1032e29f3217a97d1a",
+          "url": "https://github.com/Yinyue93/Piano/commit/c13047a33a9e949a4546b88ef2aa3cd17c923a6c"
+        },
+        "date": 1793103173485,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "1 voice",
+            "value": 50.0827,
+            "unit": "x realtime"
+          },
+          {
+            "name": "4 voices",
+            "value": 25.7451,
+            "unit": "x realtime"
+          },
+          {
+            "name": "8 voices",
+            "value": 18.2634,
+            "unit": "x realtime"
+          },
+          {
+            "name": "16 voices",
+            "value": 11.716,
             "unit": "x realtime"
           }
         ]
