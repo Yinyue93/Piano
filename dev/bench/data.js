@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793078002862,
+  "lastUpdate": 1793078840822,
   "repoUrl": "https://github.com/Yinyue93/Piano",
   "entries": {
     "Piano Performance (Windows)": [
@@ -6031,6 +6031,50 @@ window.BENCHMARK_DATA = {
           {
             "name": "16 voices",
             "value": 12.975,
+            "unit": "x realtime"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "committer": {
+            "email": "cristopherbonn4@gmail.com",
+            "name": "Yinyue93",
+            "username": "Yinyue93"
+          },
+          "distinct": true,
+          "id": "1a9712c5b4593316d44044f511cbe796d3ccbc5b",
+          "message": "Build PhysicalPianoTests in CI and count nothrow allocations\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-27T02:22:53-03:00",
+          "tree_id": "ac95ed15bf09f382760338b8c6b419f21911dafb",
+          "url": "https://github.com/Yinyue93/Piano/commit/1a9712c5b4593316d44044f511cbe796d3ccbc5b"
+        },
+        "date": 1793078840193,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "1 voice",
+            "value": 54.8648,
+            "unit": "x realtime"
+          },
+          {
+            "name": "4 voices",
+            "value": 24.6532,
+            "unit": "x realtime"
+          },
+          {
+            "name": "8 voices",
+            "value": 17.0727,
+            "unit": "x realtime"
+          },
+          {
+            "name": "16 voices",
+            "value": 10.785,
             "unit": "x realtime"
           }
         ]
