@@ -192,6 +192,9 @@ release history is in [Changelist.txt](Changelist.txt).
   instances set up in parallel sound the same.
 - Changing *Downsample*, *Hammer Position* or *String Length* and then playing sounds
   exactly like a fresh engine with those settings.
+- The allocation counter also replaces the `nothrow` forms of `operator new`, so
+  AddressSanitizer no longer reports a new/free mismatch from `std::stable_sort`.
+- CI builds `PhysicalPianoTests` too, which ctest otherwise reported as not run.
 - A missing reference render now fails instead of being written as the new baseline, and
   NaN can no longer slip through the comparisons.
 - The reference renders were made about five times louder than the plugin's default and

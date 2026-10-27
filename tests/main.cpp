@@ -81,7 +81,26 @@ void* operator new (std::size_t size)                                   { return
 void* operator new[] (std::size_t size)                                 { return countedAlloc (size); }
 void* operator new (std::size_t size, std::align_val_t a)               { return countedAlignedAlloc (size, a); }
 void* operator new[] (std::size_t size, std::align_val_t a)             { return countedAlignedAlloc (size, a); }
-void operator delete (void* p) noexcept                                 { std::free (p); }
+
+// The nothrow forms (std::stable_sort's buffer uses them) must come from the
+// same heap as the deletes below, or a sanitizer's own new pairs with free
+template <typename Alloc>
+static void* nothrowAlloc (Alloc&& alloc) noexcept
+{
+    try { return alloc(); }
+    catch (const std::bad_alloc&) { return nullptr; }
+}
+
+void* operator new (std::size_t size, const std::nothrow_t&) noexcept   { return nothrowAlloc ([&] { return countedAlloc (size); }); }
+void* operator new[] (std::size_t size, const std::nothrow_t&) noexcept { return nothrowAlloc ([&] { return countedAlloc (size); }); }
+void* operator new (std::size_t size, std::align_val_t a, const std::nothrow_t&) noexcept   { return nothrowAlloc ([&] { return countedAlignedAlloc (size, a); }); }
+void* operator new[] (std::size_t size, std::align_val_t a, const std::nothrow_t&) noexcept { return nothrowAlloc ([&] { return countedAlignedAlloc (size, a); }); }
+void operator delete (void* p, const std::nothrow_t&) noexcept                      { std::free (p); }
+void operator delete[] (void* p, const std::nothrow_t&) noexcept                    { std::free (p); }
+void operator delete (void* p, std::align_val_t, const std::nothrow_t&) noexcept    { alignedFree (p); }
+void operator delete[] (void* p, std::align_val_t, const std::nothrow_t&) noexcept  { alignedFree (p); }
+
+void operator delete (void* p) noexcept                                { std::free (p); }
 void operator delete[] (void* p) noexcept                               { std::free (p); }
 void operator delete (void* p, std::size_t) noexcept                    { std::free (p); }
 void operator delete[] (void* p, std::size_t) noexcept                  { std::free (p); }

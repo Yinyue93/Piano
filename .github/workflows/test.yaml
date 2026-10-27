@@ -61,7 +61,7 @@ jobs:
           cmake -B build -G "${{ matrix.cmake_generator }}" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DENABLE_ASAN=OFF ${{ matrix.cmake_extra }}
 
       - name: Build tests
-        run: cmake --build build --target PianoTests --config Release
+        run: cmake --build build --target PianoTests PhysicalPianoTests --config Release
 
       # Linux needs xvfb for GUI initialization
       - name: Run tests (Linux)
